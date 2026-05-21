@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.3.0 (2026-05-21)
+
+### Chores
+
+- Bump image tag to v1.2.0
+  ([`780f041`](https://github.com/MagmaMoose/comment-commander/commit/780f04134bf2f30d5a99246e602c6e7a3be2466a))
+
+### Features
+
+- **slack**: Post per-comment decision notifications to Slack
+  ([`862cce8`](https://github.com/MagmaMoose/comment-commander/commit/862cce80bcdad7fc331002f01a0cb423ead576a3))
+
+
 ## v1.2.0 (2026-05-21)
 
 ### Chores
