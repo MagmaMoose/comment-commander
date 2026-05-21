@@ -34,6 +34,8 @@ def settings(tmp_path: Path) -> Settings:
         max_file_bytes=180_000,
         max_comments_per_event=5,
         dry_run=False,
+        slack_bot_token=None,
+        slack_channel_id=None,
         dedupe_db_path=str(tmp_path / "deliveries.db"),
     )
 

@@ -16,6 +16,7 @@ from github_client import verify_signature
 from llm import build_provider
 from processor import extract_jobs, process_jobs
 from signing import install_ssh_signing_key
+from slack import SlackNotifier
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -59,6 +60,7 @@ def create_app(
     provider: Any = None,
     signing_key_path: str | Path | None = None,
     deliveries: DeliveryStore | None = None,
+    slack: SlackNotifier | None = None,
 ) -> FastAPI:
     settings = settings or Settings.load()
     signing_key_path = signing_key_path or install_ssh_signing_key(
@@ -71,12 +73,17 @@ def create_app(
         settings.llm_base_url,
     )
     deliveries = deliveries or DeliveryStore(settings.dedupe_db_path)
+    slack = slack or SlackNotifier(
+        token=settings.slack_bot_token,
+        channel=settings.slack_channel_id,
+    )
     logger.info(
-        "boot llm_provider=%s llm_model=%s author=%s <%s> dry_run=%s allow_repos=%s",
+        "boot llm_provider=%s llm_model=%s author=%s <%s> dry_run=%s allow_repos=%s slack=%s",
         settings.llm_provider, settings.llm_model,
         settings.git_author_name, settings.git_author_email,
         settings.dry_run,
         sorted(settings.allowed_repositories) or "*",
+        "on" if slack.enabled else "off",
     )
     app = FastAPI()
     app.state.settings = settings
@@ -172,6 +179,7 @@ def create_app(
                 delivery=delivery,
                 provider=provider,
                 signing_key_path=signing_key_path,
+                slack=slack,
             )
             logger.info("delivery processed delivery=%s", delivery)
         except Exception:  # noqa: BLE001 - background task must not crash the server

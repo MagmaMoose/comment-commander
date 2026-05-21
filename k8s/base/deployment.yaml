@@ -72,6 +72,11 @@ spec:
               value: "INFO"
             - name: DEDUPE_DB_PATH
               value: "/var/lib/comment-commander/deliveries.db"
+            # Slack channel ID for decision notifications (Magmamoose workspace).
+            # Paired with SLACK_BOT_TOKEN from the OCI Vault ExternalSecret.
+            # Leave empty to disable Slack posting without removing the token.
+            - name: SLACK_CHANNEL_ID
+              value: "C0B4YC7FBPZ"
           readinessProbe:
             httpGet:
               path: /health

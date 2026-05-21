@@ -16,7 +16,7 @@ from main import create_app
 def captured(monkeypatch) -> list[dict[str, Any]]:
     sink: list[dict[str, Any]] = []
 
-    def fake_process_jobs(jobs, settings_arg, *, delivery, provider, signing_key_path):
+    def fake_process_jobs(jobs, settings_arg, *, delivery, provider, signing_key_path, **_):
         sink.append({
             "jobs": jobs,
             "delivery": delivery,

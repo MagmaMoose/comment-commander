@@ -28,6 +28,7 @@ from llm import (
     LLMProvider,
 )
 from signing import configure_repo_signing
+from slack import SlackNotifier
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,24 @@ class ReviewJob:
     pr_number: int
     review_id: int | None
     comment: ReviewComment | None
+
+
+@dataclass
+class _PendingReply:
+    """In-flight bot action queued until after the optional push.
+
+    `decision` carries the LLM verdict (fix/dismiss/skip) for downstream
+    notifications. `None` means we couldn't even reach a verdict (file
+    unreadable / LLM error) — no Slack ping in that case.
+    """
+    comment: ReviewComment
+    thread: ReviewThread | None
+    body: str
+    resolve: bool
+    decision: Any = None  # Literal["fix", "dismiss", "skip"] | None
+    commit_sha: str | None = None
+    commit_subject: str | None = None
+    reply_text: str = ""
 
 
 def extract_jobs(payload: dict[str, Any], event: str, settings: Settings) -> list[ReviewJob]:
@@ -109,6 +128,7 @@ def process_jobs(
     delivery: str,
     provider: LLMProvider,
     signing_key_path: str | Path,
+    slack: SlackNotifier | None = None,
 ) -> None:
     if not jobs:
         return
@@ -140,6 +160,7 @@ def process_jobs(
             provider=provider,
             signing_key_path=signing_key_path,
             delivery=delivery,
+            slack=slack or SlackNotifier(token=None, channel=None),
         )
 
 
@@ -181,6 +202,7 @@ def _process_pr(
     provider: LLMProvider,
     signing_key_path: str | Path,
     delivery: str,
+    slack: SlackNotifier,
 ) -> None:
     pending: list[tuple[ReviewComment, ReviewThread | None]] = []
     for comment in comments:
@@ -223,7 +245,7 @@ def _process_pr(
             settings.git_author_email,
         )
 
-        replies: list[tuple[ReviewComment, ReviewThread | None, str, bool]] = []
+        replies: list[_PendingReply] = []
         committed_any = False
 
         for comment, thread in pending:
@@ -237,11 +259,10 @@ def _process_pr(
                     "could not read commented file comment_id=%s path=%s",
                     comment.id, comment.path,
                 )
-                replies.append((
-                    comment,
-                    thread,
-                    "I could not safely inspect the file referenced by this comment, so I am leaving this thread open for manual review.",
-                    False,
+                replies.append(_PendingReply(
+                    comment=comment, thread=thread,
+                    body="I could not safely inspect the file referenced by this comment, so I am leaving this thread open for manual review.",
+                    resolve=False, decision=None,
                 ))
                 continue
             try:
@@ -253,11 +274,10 @@ def _process_pr(
                 ))
             except LLMError as exc:
                 logger.warning("LLM call failed comment_id=%s: %s", comment.id, exc)
-                replies.append((
-                    comment,
-                    thread,
-                    "I could not produce a confident answer for this comment, so I am leaving this thread open for manual review.",
-                    False,
+                replies.append(_PendingReply(
+                    comment=comment, thread=thread,
+                    body="I could not produce a confident answer for this comment, so I am leaving this thread open for manual review.",
+                    resolve=False, decision=None,
                 ))
                 continue
 
@@ -267,21 +287,19 @@ def _process_pr(
             )
 
             if decision.decision == "skip":
-                replies.append((
-                    comment,
-                    thread,
-                    decision.reply
+                replies.append(_PendingReply(
+                    comment=comment, thread=thread,
+                    body=decision.reply
                     or "I could not determine a safe change here without more repository context.",
-                    False,
+                    resolve=False, decision="skip", reply_text=decision.reply,
                 ))
                 continue
 
             if decision.decision == "dismiss":
-                replies.append((
-                    comment,
-                    thread,
-                    decision.reply or "This does not appear to require a code change.",
-                    True,
+                replies.append(_PendingReply(
+                    comment=comment, thread=thread,
+                    body=decision.reply or "This does not appear to require a code change.",
+                    resolve=True, decision="dismiss", reply_text=decision.reply,
                 ))
                 continue
 
@@ -291,11 +309,10 @@ def _process_pr(
                 comment.id, len(applied), [c.path for c in applied],
             )
             if not applied:
-                replies.append((
-                    comment,
-                    thread,
-                    decision.reply or "The current code already appears to address this.",
-                    True,
+                replies.append(_PendingReply(
+                    comment=comment, thread=thread,
+                    body=decision.reply or "The current code already appears to address this.",
+                    resolve=True, decision="dismiss", reply_text=decision.reply,
                 ))
                 continue
 
@@ -305,46 +322,67 @@ def _process_pr(
                     comment.id, [f.path for f in applied],
                 )
                 _reset_repo(repo_dir)
-                replies.append((comment, thread, decision.reply or "Dry run: change preview only.", False))
+                replies.append(_PendingReply(
+                    comment=comment, thread=thread,
+                    body=decision.reply or "Dry run: change preview only.",
+                    resolve=False, decision="skip", reply_text=decision.reply,
+                ))
                 continue
 
             sha = _commit_signed(repo_dir, decision, settings)
+            subject = _commit_subject(decision)
             logger.info(
                 "signed commit sha=%s subject=%r comment_id=%s",
-                sha[:7], _commit_subject(decision), comment.id,
+                sha[:7], subject, comment.id,
             )
             committed_any = True
-            replies.append((
-                comment,
-                thread,
-                decision.reply or f"Addressed in {sha[:7]}.",
-                True,
+            replies.append(_PendingReply(
+                comment=comment, thread=thread,
+                body=decision.reply or f"Addressed in {sha[:7]}.",
+                resolve=True, decision="fix",
+                commit_sha=sha, commit_subject=subject,
+                reply_text=decision.reply,
             ))
 
         if committed_any:
             _push(repo_dir, head_branch)
             logger.info("pushed branch=%s repo=%s", head_branch, head_repo.full_name)
 
-        for comment, thread, body, resolve in replies:
+        for pending_reply in replies:
             replied = False
             resolved = False
             try:
-                if body.strip():
-                    gh.reply_to_comment(base_repo, pr_number, comment.id, body[:2000])
+                if pending_reply.body.strip():
+                    gh.reply_to_comment(
+                        base_repo, pr_number, pending_reply.comment.id,
+                        pending_reply.body[:2000],
+                    )
                     replied = True
-                if resolve and thread and not thread.is_resolved:
-                    gh.resolve_thread(thread.id)
+                if pending_reply.resolve and pending_reply.thread and not pending_reply.thread.is_resolved:
+                    gh.resolve_thread(pending_reply.thread.id)
                     resolved = True
             except GitHubError as exc:
                 logger.warning(
                     "reply/resolve failed comment_id=%s: %s",
-                    comment.id, exc,
+                    pending_reply.comment.id, exc,
                 )
                 continue
             logger.info(
                 "thread handled comment_id=%s replied=%s resolved=%s",
-                comment.id, replied, resolved,
+                pending_reply.comment.id, replied, resolved,
             )
+            if pending_reply.decision is not None:
+                slack.notify_decision(
+                    decision=pending_reply.decision,
+                    repo=base_repo.full_name,
+                    pr_number=pr_number,
+                    comment_id=pending_reply.comment.id,
+                    comment_path=pending_reply.comment.path,
+                    comment_line=pending_reply.comment.line,
+                    commit_sha=pending_reply.commit_sha,
+                    commit_subject=pending_reply.commit_subject,
+                    reply=pending_reply.reply_text or "",
+                )
 
 
 def _context_for(

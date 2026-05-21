@@ -44,6 +44,10 @@ class Settings:
     max_comments_per_event: int
     dry_run: bool
 
+    # Slack notifications (optional). When either is unset, Slack posting is a no-op.
+    slack_bot_token: str | None
+    slack_channel_id: str | None
+
     # Storage
     dedupe_db_path: str
 
@@ -67,6 +71,8 @@ class Settings:
                 os.environ.get("MAX_COMMENTS_PER_EVENT"), DEFAULT_MAX_COMMENTS_PER_EVENT
             ),
             dry_run=_truthy(os.environ.get("DRY_RUN")),
+            slack_bot_token=(os.environ.get("SLACK_BOT_TOKEN") or None),
+            slack_channel_id=(os.environ.get("SLACK_CHANNEL_ID") or None),
             dedupe_db_path=os.environ.get("DEDUPE_DB_PATH", "/var/lib/comment-commander/deliveries.db"),
         )
 
