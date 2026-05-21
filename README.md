@@ -32,11 +32,43 @@ curl -X POST https://comment-commander.magmamoose.com/process \
 
 Differences vs the webhook path:
 - Every author counts — humans, Copilot, other review bots — not just the `BOT_LOGINS` allow-list.
+- The `INVOLVED_USERS` whitelist is **bypassed** (manual = explicit intent — even PRs you didn't author can be processed this way).
 - Thread starters only; reply-comments (`in_reply_to_id` set) are skipped.
 - Bot replies carry a hidden `<!-- comment-commander -->` marker so re-runs ignore them and never loop.
 - Resolved threads are still skipped (same as the webhook flow).
 
-Auth reuses `GITHUB_WEBHOOK_SECRET` (no new vault entry needed). The shorthand form `owner/repo#N` is also accepted.
+Auth reuses `GITHUB_WEBHOOK_SECRET` (no new vault entry needed). The shorthand form `owner/repo#N` and GHE URLs (`https://pinkroccade.ghe.com/org/repo/pull/N`) are also accepted.
+
+## Subscribe a repo or org (`POST /setup-webhook`)
+
+Programmatically register the webhook on a target so you don't have to click through the GitHub UI:
+
+```bash
+# Single repo
+curl -X POST https://comment-commander.magmamoose.com/setup-webhook \
+  -H "X-Trigger-Token: $GITHUB_WEBHOOK_SECRET" \
+  -d '{"target": "https://github.com/CalebSargeant/infra"}'
+
+# Whole org (every repo in it auto-fires)
+curl -X POST https://comment-commander.magmamoose.com/setup-webhook \
+  -H "X-Trigger-Token: $GITHUB_WEBHOOK_SECRET" \
+  -d '{"target": "https://github.com/magmamoose"}'
+
+# GHE org
+curl -X POST https://comment-commander.magmamoose.com/setup-webhook \
+  -H "X-Trigger-Token: $GITHUB_WEBHOOK_SECRET" \
+  -d '{"target": "https://pinkroccade.ghe.com/some-org"}'
+```
+
+Auth and instance-detection follow the same rules as `/process`. The PAT for the matched instance must have the right scope: `admin:repo_hook` (or classic `repo` w/ admin) for repo targets, `admin:org_hook` for orgs.
+
+## Multi-instance (GitHub.com + Enterprise)
+
+Configure GHE alongside github.com by setting `GHE_HOST`, `GHE_PAT`, `GHE_AUTHOR_NAME`, `GHE_AUTHOR_EMAIL`. Each incoming webhook (and each `/process` call) is routed to the matching instance based on the URL host. Commits to GHE are made with the GHE identity; commits to github.com use the github.com identity. The same SSH signing key works on both as long as the public half is registered as a Signing Key on both accounts.
+
+## Involvement whitelist (webhook only)
+
+`INVOLVED_USERS` (comma-separated case-insensitive logins) restricts the webhook flow to PRs where one of those logins has authored or committed. So if a colleague opens a PR you have nothing in, the bot stays silent; the moment you push a commit there, the next webhook fires the bot. `/process` bypasses this filter entirely.
 
 ## LLM provider
 

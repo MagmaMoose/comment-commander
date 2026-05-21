@@ -108,9 +108,11 @@ def test_dispatches_review_event(settings, stub_provider, deliveries, captured):
             "full_name": "octo-org/octo-repo",
             "name": "octo-repo",
             "owner": {"login": "octo-org"},
+            "html_url": "https://github.com/octo-org/octo-repo",
         },
         "pull_request": {
             "number": 12,
+            "html_url": "https://github.com/octo-org/octo-repo/pull/12",
             "head": {
                 "ref": "feature/copilot-fix",
                 "sha": "head-sha",

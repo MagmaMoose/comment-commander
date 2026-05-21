@@ -72,8 +72,10 @@ def test_format_reply_body_empty():
 def captured_manual(monkeypatch) -> list[dict[str, Any]]:
     sink: list[dict[str, Any]] = []
 
-    def fake_process_pr_manual(repo, pr_number, settings_arg, *, trigger_id, provider, signing_key_path, slack=None, **_):
+    def fake_process_pr_manual(instance, repo, pr_number, settings_arg, *, trigger_id, provider, signing_key_path, slack=None, **_):
         sink.append({
+            "instance": instance.name,
+            "host": instance.host,
             "repo": repo.full_name,
             "pr_number": pr_number,
             "trigger_id": trigger_id,

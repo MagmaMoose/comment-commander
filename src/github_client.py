@@ -33,6 +33,81 @@ class RepositoryRef:
 
 
 @dataclass(frozen=True)
+class GitHubInstance:
+    """A single GitHub-or-GHE deployment the bot is configured against.
+
+    Each instance carries its own PAT and git author identity. Detection
+    of which instance a webhook belongs to happens by matching the
+    payload's `repository.html_url` against `host`.
+    """
+    name: str
+    host: str
+    api_base: str
+    graphql_url: str
+    pat: str
+    author_name: str
+    author_email: str
+
+    @classmethod
+    def github_com(cls, *, pat: str, author_name: str, author_email: str) -> "GitHubInstance":
+        return cls(
+            name="github",
+            host="github.com",
+            api_base="https://api.github.com",
+            graphql_url="https://api.github.com/graphql",
+            pat=pat, author_name=author_name, author_email=author_email,
+        )
+
+    @classmethod
+    def ghe(cls, *, host: str, pat: str, author_name: str, author_email: str) -> "GitHubInstance":
+        return cls(
+            name="ghe",
+            host=host,
+            api_base=f"https://{host}/api/v3",
+            graphql_url=f"https://{host}/api/graphql",
+            pat=pat, author_name=author_name, author_email=author_email,
+        )
+
+    def clone_url(self, owner: str, repo: str) -> str:
+        return f"https://x-access-token:{self.pat}@{self.host}/{owner}/{repo}.git"
+
+    def repo_url(self, owner: str, repo: str) -> str:
+        return f"https://{self.host}/{owner}/{repo}"
+
+    def html_url_prefix(self) -> str:
+        return f"https://{self.host}/"
+
+
+def find_instance_for_payload(
+    payload: dict[str, Any], instances: list[GitHubInstance]
+) -> GitHubInstance | None:
+    """Pick the right instance for an incoming webhook by inspecting URLs."""
+    candidates = []
+    repo = payload.get("repository")
+    if isinstance(repo, dict):
+        candidates.append(repo.get("html_url"))
+        candidates.append(repo.get("clone_url"))
+    pull = payload.get("pull_request")
+    if isinstance(pull, dict):
+        candidates.append(pull.get("html_url"))
+    for url in candidates:
+        if not isinstance(url, str):
+            continue
+        for inst in instances:
+            if url.startswith(inst.html_url_prefix()):
+                return inst
+    return None
+
+
+def find_instance_for_host(host: str, instances: list[GitHubInstance]) -> GitHubInstance | None:
+    host = host.lower().strip()
+    for inst in instances:
+        if inst.host.lower() == host:
+            return inst
+    return None
+
+
+@dataclass(frozen=True)
 class ReviewComment:
     id: int
     node_id: str | None
@@ -60,15 +135,32 @@ def verify_signature(body: bytes, header: str | None, secret: str) -> bool:
 
 
 class GitHubClient:
-    def __init__(self, token: str, *, timeout: float = 30.0):
+    def __init__(
+        self,
+        token: str,
+        *,
+        rest_base: str = GITHUB_API_BASE,
+        graphql_url: str | None = None,
+        timeout: float = 30.0,
+    ):
+        self._graphql_url = graphql_url or f"{rest_base.rstrip('/')}/graphql"
         self._client = httpx.Client(
-            base_url=GITHUB_API_BASE,
+            base_url=rest_base,
             headers={
                 "accept": "application/vnd.github+json",
                 "authorization": f"Bearer {token}",
                 "user-agent": USER_AGENT,
                 "x-github-api-version": GITHUB_API_VERSION,
             },
+            timeout=timeout,
+        )
+
+    @classmethod
+    def for_instance(cls, instance: "GitHubInstance", *, timeout: float = 30.0) -> "GitHubClient":
+        return cls(
+            instance.pat,
+            rest_base=instance.api_base,
+            graphql_url=instance.graphql_url,
             timeout=timeout,
         )
 
@@ -240,8 +332,10 @@ class GitHubClient:
         )
 
     def _graphql(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
+        # GHE's GraphQL endpoint is at /api/graphql (not /api/v3/graphql),
+        # so we use an absolute URL rather than a path relative to rest_base.
         response = self._client.post(
-            "/graphql",
+            self._graphql_url,
             json={"query": query, "variables": variables},
         )
         if not response.is_success:
@@ -252,6 +346,85 @@ class GitHubClient:
         if isinstance(body, dict) and body.get("errors"):
             raise GitHubError(f"graphql errors: {body['errors']}")
         return body if isinstance(body, dict) else {}
+
+    # --- new REST helpers ------------------------------------------------
+
+    def list_pr_commits(self, repo: RepositoryRef, pr_number: int) -> list[dict[str, Any]]:
+        """Return all commits in a PR (paginated)."""
+        out: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            response = self._client.get(
+                f"/repos/{quote(repo.owner)}/{quote(repo.repo)}/pulls/{pr_number}/commits",
+                params={"per_page": 100, "page": page},
+            )
+            if not response.is_success:
+                raise GitHubError(
+                    f"list_pr_commits failed ({response.status_code}): {response.text[:200]}"
+                )
+            items = response.json()
+            if not isinstance(items, list) or not items:
+                break
+            out.extend(item for item in items if isinstance(item, dict))
+            if len(items) < 100:
+                break
+            page += 1
+        return out
+
+    def create_repo_hook(
+        self,
+        repo: RepositoryRef,
+        *,
+        webhook_url: str,
+        secret: str,
+        events: list[str],
+    ) -> dict[str, Any]:
+        return self._create_hook(
+            f"/repos/{quote(repo.owner)}/{quote(repo.repo)}/hooks",
+            webhook_url=webhook_url, secret=secret, events=events,
+        )
+
+    def create_org_hook(
+        self,
+        org: str,
+        *,
+        webhook_url: str,
+        secret: str,
+        events: list[str],
+    ) -> dict[str, Any]:
+        return self._create_hook(
+            f"/orgs/{quote(org)}/hooks",
+            webhook_url=webhook_url, secret=secret, events=events,
+        )
+
+    def _create_hook(
+        self,
+        path: str,
+        *,
+        webhook_url: str,
+        secret: str,
+        events: list[str],
+    ) -> dict[str, Any]:
+        payload = {
+            "name": "web",
+            "active": True,
+            "events": events,
+            "config": {
+                "url": webhook_url,
+                "content_type": "json",
+                "secret": secret,
+                "insecure_ssl": "0",
+            },
+        }
+        response = self._client.post(path, json=payload)
+        if not response.is_success:
+            raise GitHubError(
+                f"create_hook failed ({response.status_code}): {response.text[:300]}"
+            )
+        body = response.json()
+        if not isinstance(body, dict):
+            raise GitHubError("create_hook returned non-object payload")
+        return body
 
 
 def parse_review_comment(payload: dict[str, Any]) -> ReviewComment:

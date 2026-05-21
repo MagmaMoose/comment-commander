@@ -51,6 +51,7 @@ def test_extracts_review_event(settings):
             "full_name": "octo-org/octo-repo",
             "name": "octo-repo",
             "owner": {"login": "octo-org"},
+            "html_url": "https://github.com/octo-org/octo-repo",
         },
         "pull_request": {
             "number": 12,
@@ -79,6 +80,7 @@ def test_ignores_non_bot_review(settings):
             "full_name": "octo-org/octo-repo",
             "name": "octo-repo",
             "owner": {"login": "octo-org"},
+            "html_url": "https://github.com/octo-org/octo-repo",
         },
         "pull_request": {
             "number": 12,

@@ -14,9 +14,11 @@ from config import Settings
 from github_client import (
     GitHubClient,
     GitHubError,
+    GitHubInstance,
     RepositoryRef,
     ReviewComment,
     ReviewThread,
+    find_instance_for_payload,
     parse_review_comment,
 )
 from llm import (
@@ -76,6 +78,7 @@ def _format_reply_body(body: str) -> str:
 
 @dataclass(frozen=True)
 class ReviewJob:
+    instance: GitHubInstance
     base_repo: RepositoryRef
     head_repo: RepositoryRef
     head_branch: str
@@ -103,7 +106,15 @@ class _PendingReply:
 
 
 def extract_jobs(payload: dict[str, Any], event: str, settings: Settings) -> list[ReviewJob]:
-    """Convert a webhook payload to zero-or-more `ReviewJob`s."""
+    """Convert a webhook payload to zero-or-more `ReviewJob`s.
+
+    Picks the matching GitHubInstance (github.com or GHE) from the
+    payload's URLs. Returns [] if no instance matches — i.e. webhook
+    came from a host the bot wasn't configured against.
+    """
+    instance = find_instance_for_payload(payload, settings.instances)
+    if instance is None:
+        return []
     repo = _parse_repo(payload.get("repository"))
     pull = payload.get("pull_request") or {}
     if not repo or not isinstance(pull, dict):
@@ -128,6 +139,7 @@ def extract_jobs(payload: dict[str, Any], event: str, settings: Settings) -> lis
         if (comment.user_login or "").lower() not in settings.bot_logins:
             return []
         return [ReviewJob(
+            instance=instance,
             base_repo=repo,
             head_repo=head_repo,
             head_branch=branch,
@@ -147,6 +159,7 @@ def extract_jobs(payload: dict[str, Any], event: str, settings: Settings) -> lis
         if not isinstance(review_id, int) or (review_user or "").lower() not in settings.bot_logins:
             return []
         return [ReviewJob(
+            instance=instance,
             base_repo=repo,
             head_repo=head_repo,
             head_branch=branch,
@@ -158,7 +171,35 @@ def extract_jobs(payload: dict[str, Any], event: str, settings: Settings) -> lis
     return []
 
 
+def user_has_commits(
+    gh: GitHubClient,
+    repo: RepositoryRef,
+    pr_number: int,
+    involved_users: frozenset[str],
+) -> bool:
+    """True iff any commit on the PR is authored or committed by one of
+    `involved_users` (case-insensitive logins). Used to decide whether
+    the webhook flow should act on this PR — bypassed by /process.
+    """
+    if not involved_users:
+        return True  # whitelist disabled = always process
+    try:
+        commits = gh.list_pr_commits(repo, pr_number)
+    except GitHubError as exc:
+        logger.warning("user_has_commits: list_pr_commits failed: %s", exc)
+        return True  # fail open — better to over-process than miss the user's PR
+    for commit in commits:
+        for role in ("author", "committer"):
+            actor = commit.get(role)
+            if isinstance(actor, dict):
+                login = (actor.get("login") or "").lower()
+                if login in involved_users:
+                    return True
+    return False
+
+
 def process_pr_manual(
+    instance: GitHubInstance,
     repo: RepositoryRef,
     pr_number: int,
     settings: Settings,
@@ -173,11 +214,10 @@ def process_pr_manual(
     Differences vs the webhook flow:
     - Author isn't restricted to BOT_LOGINS; any non-bot author counts
       (humans, Copilot, other review bots).
-    - Thread-reply comments (the ones with in_reply_to_id set) are
-      skipped so we only act on thread starters.
-    - Comments carrying the `BOT_MARKER` are skipped so we don't recurse
-      into our own past replies.
-    - `_process_pr` then drops anything already resolved.
+    - Thread-reply comments (in_reply_to_id set) are skipped.
+    - Comments carrying BOT_MARKER are skipped so we don't recurse into
+      our own past replies.
+    - INVOLVED_USERS whitelist is NOT applied (manual = explicit intent).
     """
     if settings.allowed_repositories and repo.full_name not in settings.allowed_repositories:
         logger.info(
@@ -186,10 +226,10 @@ def process_pr_manual(
         )
         return
     logger.info(
-        "manual trigger received trigger=%s repo=%s pr=%s",
-        trigger_id, repo.full_name, pr_number,
+        "manual trigger received trigger=%s instance=%s repo=%s pr=%s",
+        trigger_id, instance.name, repo.full_name, pr_number,
     )
-    with GitHubClient(settings.github_pat) as gh:
+    with GitHubClient.for_instance(instance) as gh:
         try:
             pr = gh.get_pull_request(repo, pr_number)
         except GitHubError as exc:
@@ -225,6 +265,7 @@ def process_pr_manual(
 
         actionable = actionable[: settings.max_comments_per_event]
         _process_pr(
+            instance=instance,
             base_repo=repo,
             head_repo=head_repo,
             head_branch=head_branch,
@@ -251,11 +292,20 @@ def process_jobs(
     if not jobs:
         return
     first = jobs[0]
+    instance = first.instance
     logger.info(
-        "processing webhook delivery=%s repo=%s pr=%s jobs=%d",
-        delivery, first.base_repo.full_name, first.pr_number, len(jobs),
+        "processing webhook delivery=%s instance=%s repo=%s pr=%s jobs=%d",
+        delivery, instance.name, first.base_repo.full_name, first.pr_number, len(jobs),
     )
-    with GitHubClient(settings.github_pat) as gh:
+    with GitHubClient.for_instance(instance) as gh:
+        # INVOLVED_USERS whitelist (webhook flow only — /process bypasses).
+        if not user_has_commits(gh, first.base_repo, first.pr_number, settings.involved_users):
+            logger.info(
+                "skipping PR — no commits by INVOLVED_USERS=%s delivery=%s repo=%s pr=%s",
+                sorted(settings.involved_users), delivery,
+                first.base_repo.full_name, first.pr_number,
+            )
+            return
         comments = _collect_comments(jobs, gh, settings)
         if not comments:
             logger.info(
@@ -268,6 +318,7 @@ def process_jobs(
             len(comments), delivery, first.base_repo.full_name, first.pr_number,
         )
         _process_pr(
+            instance=instance,
             base_repo=first.base_repo,
             head_repo=first.head_repo,
             head_branch=first.head_branch,
@@ -310,6 +361,7 @@ def _collect_comments(
 
 def _process_pr(
     *,
+    instance: GitHubInstance,
     base_repo: RepositoryRef,
     head_repo: RepositoryRef,
     head_branch: str,
@@ -351,16 +403,16 @@ def _process_pr(
 
     with tempfile.TemporaryDirectory(prefix="comment-commander-") as tmp:
         repo_dir = Path(tmp) / "repo"
-        _clone(head_repo, head_branch, repo_dir, settings)
+        _clone(instance, head_repo, head_branch, repo_dir)
         logger.info(
-            "cloned repo=%s branch=%s dir=%s",
-            head_repo.full_name, head_branch, repo_dir,
+            "cloned instance=%s repo=%s branch=%s dir=%s",
+            instance.name, head_repo.full_name, head_branch, repo_dir,
         )
         configure_repo_signing(
             repo_dir,
             signing_key_path,
-            settings.git_author_name,
-            settings.git_author_email,
+            instance.author_name,
+            instance.author_email,
         )
 
         replies: list[_PendingReply] = []
@@ -501,6 +553,7 @@ def _process_pr(
                     commit_sha=pending_reply.commit_sha,
                     commit_subject=pending_reply.commit_subject,
                     reply=pending_reply.reply_text or "",
+                    host=instance.host,
                 )
 
 
@@ -568,10 +621,14 @@ def _apply_files(repo_dir: Path, files: list[FileChange]) -> list[FileChange]:
     return applied
 
 
-def _clone(repo: RepositoryRef, branch: str, dest: Path, settings: Settings) -> None:
+def _clone(
+    instance: GitHubInstance, repo: RepositoryRef, branch: str, dest: Path
+) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    url = f"https://x-access-token:{settings.github_pat}@github.com/{repo.owner}/{repo.repo}.git"
-    _run(["git", "clone", "--depth", "1", "--branch", branch, url, str(dest)])
+    _run([
+        "git", "clone", "--depth", "1", "--branch", branch,
+        instance.clone_url(repo.owner, repo.repo), str(dest),
+    ])
 
 
 def _commit_signed(repo_dir: Path, decision: Decision, settings: Settings) -> str:
@@ -613,9 +670,9 @@ def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
 
 
 def _redact_pat(arg: str) -> str:
-    if "x-access-token:" in arg:
-        return "https://x-access-token:***@github.com/.../...git"
-    return arg
+    # Works for both github.com and GHE — match the token marker and keep
+    # the rest of the URL intact so logs still show which repo we clone.
+    return re.sub(r"://x-access-token:[^@]+@", "://x-access-token:***@", arg)
 
 
 _CONVENTIONAL_COMMIT_TYPES = (

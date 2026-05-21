@@ -48,6 +48,21 @@ spec:
               value: "CalebSargeant"
             - name: GIT_AUTHOR_EMAIL
               value: "4991715+CalebSargeant@users.noreply.github.com"
+            # GHE (pinkroccade.ghe.com). Empty values keep GHE disabled.
+            - name: GHE_HOST
+              value: "pinkroccade.ghe.com"
+            - name: GHE_AUTHOR_NAME
+              value: "sargea50"
+            - name: GHE_AUTHOR_EMAIL
+              value: "Caleb.sargeant@pinkroccade.nl"
+            # Restrict webhook-flow processing to PRs where one of these
+            # logins has a commit. /process bypasses this — manual = intent.
+            - name: INVOLVED_USERS
+              value: "CalebSargeant,sargea50"
+            # Public URL the bot tells GitHub/GHE to deliver webhooks to.
+            # Used by POST /setup-webhook.
+            - name: PUBLIC_WEBHOOK_URL
+              value: "https://comment-commander.magmamoose.com/webhook"
             - name: LLM_PROVIDER
               value: "deepseek"
             - name: LLM_MODEL

@@ -5,6 +5,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -14,7 +15,13 @@ from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, Re
 
 from config import Settings
 from dedupe import DeliveryStore
-from github_client import verify_signature
+from github_client import (
+    GitHubClient,
+    GitHubError,
+    GitHubInstance,
+    find_instance_for_host,
+    verify_signature,
+)
 from llm import build_provider
 from processor import extract_jobs, parse_pr_url, process_jobs, process_pr_manual
 from signing import install_ssh_signing_key
@@ -80,11 +87,13 @@ def create_app(
         channel=settings.slack_channel_id,
     )
     logger.info(
-        "boot llm_provider=%s llm_model=%s author=%s <%s> dry_run=%s allow_repos=%s slack=%s",
+        "boot llm_provider=%s llm_model=%s instances=%s involved_users=%s "
+        "allow_repos=%s dry_run=%s slack=%s",
         settings.llm_provider, settings.llm_model,
-        settings.git_author_name, settings.git_author_email,
-        settings.dry_run,
+        [f"{i.name}@{i.host}({i.author_name})" for i in settings.instances],
+        sorted(settings.involved_users) or "*",
         sorted(settings.allowed_repositories) or "*",
+        settings.dry_run,
         "on" if slack.enabled else "off",
     )
     app = FastAPI()
@@ -217,19 +226,31 @@ def create_app(
         if not parsed:
             raise HTTPException(status_code=400, detail="invalid_pr_url")
         repo, pr_number = parsed
+        host = _host_from_pr_url(body.get("pr_url") or "")
+        instance = (
+            find_instance_for_host(host, settings.instances)
+            if host
+            else settings.instances[0]
+        )
+        if instance is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown_host: {host} (configured: {[i.host for i in settings.instances]})",
+            )
         trigger_id = uuid.uuid4().hex[:12]
         logger.info(
-            "manual /process accepted trigger=%s repo=%s pr=%s",
-            trigger_id, repo.full_name, pr_number,
+            "manual /process accepted trigger=%s instance=%s repo=%s pr=%s",
+            trigger_id, instance.name, repo.full_name, pr_number,
         )
         background_tasks.add_task(
             _run_manual,
-            repo=repo, pr_number=pr_number, trigger_id=trigger_id,
+            instance=instance, repo=repo, pr_number=pr_number, trigger_id=trigger_id,
         )
         return Response(
             content=json.dumps({
                 "status": "processing",
                 "trigger_id": trigger_id,
+                "instance": instance.name,
                 "repo": repo.full_name,
                 "pr": pr_number,
             }),
@@ -237,10 +258,10 @@ def create_app(
             status_code=202,
         )
 
-    def _run_manual(*, repo, pr_number: int, trigger_id: str) -> None:
+    def _run_manual(*, instance: GitHubInstance, repo, pr_number: int, trigger_id: str) -> None:
         try:
             process_pr_manual(
-                repo, pr_number,
+                instance, repo, pr_number,
                 settings,
                 trigger_id=trigger_id,
                 provider=provider,
@@ -251,7 +272,125 @@ def create_app(
         except Exception:  # noqa: BLE001
             logger.exception("manual_trigger_failed trigger=%s", trigger_id)
 
+    @app.post("/setup-webhook")
+    async def setup_webhook(
+        request: Request,
+        x_trigger_token: str | None = Header(default=None),
+    ) -> Response:
+        """Provision the GitHub webhook for a repo or an org.
+
+        Body: {"target": "https://github.com/owner/repo"}   # repo-scoped
+              {"target": "https://pinkroccade.ghe.com/some-org"} # org-scoped
+
+        Auth: X-Trigger-Token = GITHUB_WEBHOOK_SECRET (same secret already
+        used by /process).
+
+        The PAT for the matched instance must have the right scope:
+          - repo-scoped webhook: `admin:repo_hook` (or `repo` for classic PATs)
+          - org-scoped webhook:  `admin:org_hook`
+        """
+        if not x_trigger_token or not hmac.compare_digest(
+            x_trigger_token, settings.github_webhook_secret
+        ):
+            raise HTTPException(status_code=403, detail="invalid_token")
+        if not settings.public_webhook_url:
+            raise HTTPException(
+                status_code=500,
+                detail="PUBLIC_WEBHOOK_URL not configured on the deployment",
+            )
+
+        try:
+            body = await request.json()
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail=f"invalid_json: {exc}") from exc
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="invalid_body")
+
+        target = body.get("target") or ""
+        parsed = _parse_target(target)
+        if not parsed:
+            raise HTTPException(status_code=400, detail="invalid_target")
+        host, owner, maybe_repo = parsed
+        instance = find_instance_for_host(host, settings.instances)
+        if instance is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown_host: {host} (configured: {[i.host for i in settings.instances]})",
+            )
+
+        events = ["pull_request_review", "pull_request_review_comment"]
+        try:
+            with GitHubClient.for_instance(instance) as gh:
+                if maybe_repo is not None:
+                    from github_client import RepositoryRef
+                    result = gh.create_repo_hook(
+                        RepositoryRef(owner=owner, repo=maybe_repo),
+                        webhook_url=settings.public_webhook_url,
+                        secret=settings.github_webhook_secret,
+                        events=events,
+                    )
+                    scope = f"{owner}/{maybe_repo}"
+                else:
+                    result = gh.create_org_hook(
+                        owner,
+                        webhook_url=settings.public_webhook_url,
+                        secret=settings.github_webhook_secret,
+                        events=events,
+                    )
+                    scope = owner
+        except GitHubError as exc:
+            logger.warning("setup-webhook failed scope=%s: %s", scope if 'scope' in dir() else target, exc)
+            raise HTTPException(status_code=502, detail=f"github_error: {exc}") from exc
+
+        logger.info(
+            "webhook provisioned instance=%s scope=%s hook_id=%s url=%s events=%s",
+            instance.name, scope, result.get("id"),
+            settings.public_webhook_url, events,
+        )
+        return Response(
+            content=json.dumps({
+                "status": "ok",
+                "instance": instance.name,
+                "scope": scope,
+                "hook_id": result.get("id"),
+                "webhook_url": settings.public_webhook_url,
+                "events": events,
+            }),
+            media_type="application/json",
+            status_code=201,
+        )
+
     return app
+
+
+def _host_from_pr_url(url: str) -> str | None:
+    """Extract host from a PR URL. None for shorthand `owner/repo#N`."""
+    match = re.match(r"^https?://([^/]+)/", url.strip())
+    return match.group(1) if match else None
+
+
+def _parse_target(target: str) -> tuple[str, str, str | None] | None:
+    """Parse a setup-webhook target into (host, owner, repo_or_None).
+
+    Accepts:
+      https://github.com/owner/repo            -> ("github.com", "owner", "repo")
+      https://github.com/owner/repo/anything   -> ("github.com", "owner", "repo")
+      https://github.com/some-org              -> ("github.com", "some-org", None)
+      owner/repo                               -> defaults host to github.com
+    """
+    target = (target or "").strip()
+    if not target:
+        return None
+    match = re.match(
+        r"^(?:https?://(?P<host>[^/]+)/)?(?P<owner>[^/#]+)(?:/(?P<repo>[^/#?]+))?",
+        target,
+    )
+    if not match:
+        return None
+    host = match.group("host") or "github.com"
+    owner = match.group("owner")
+    repo = match.group("repo")
+    return (host.lower(), owner, repo)
 
 
 # Run with: uvicorn main:create_app --factory --host 0.0.0.0 --port 8000

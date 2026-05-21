@@ -49,6 +49,7 @@ class SlackNotifier:
         commit_sha: str | None = None,
         commit_subject: str | None = None,
         reply: str = "",
+        host: str = "github.com",
     ) -> None:
         if not self.enabled:
             return
@@ -62,6 +63,7 @@ class SlackNotifier:
             commit_sha=commit_sha,
             commit_subject=commit_subject,
             reply=reply,
+            host=host,
         )
         self._post(text)
 
@@ -79,9 +81,10 @@ class SlackNotifier:
         commit_sha: str | None,
         commit_subject: str | None,
         reply: str,
+        host: str,
     ) -> str:
         prefix = _DECISION_PREFIX.get(decision, f"*{decision}*")
-        pr_url = f"https://github.com/{repo}/pull/{pr_number}"
+        pr_url = f"https://{host}/{repo}/pull/{pr_number}"
         comment_url = f"{pr_url}#discussion_r{comment_id}"
         loc = comment_path + (f":{comment_line}" if comment_line else "")
         lines = [
@@ -90,7 +93,7 @@ class SlackNotifier:
         ]
         if decision == "fix" and commit_sha:
             short = commit_sha[:7]
-            commit_url = f"https://github.com/{repo}/commit/{commit_sha}"
+            commit_url = f"https://{host}/{repo}/commit/{commit_sha}"
             subj = commit_subject or ""
             lines.append(f"• Commit: <{commit_url}|`{short}`>  `{subj}`")
         if reply:
