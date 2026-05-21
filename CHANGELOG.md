@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.4.0 (2026-05-21)
+
+### Chores
+
+- Bump image tag to v1.3.0
+  ([`a8e2349`](https://github.com/MagmaMoose/comment-commander/commit/a8e2349e0bb3bf521c80d19175f500bf29b2dda3))
+
+### Features
+
+- **api**: POST /process to manually re-walk every comment on a PR
+  ([`661da8b`](https://github.com/MagmaMoose/comment-commander/commit/661da8b627f73374efc2962fadeb58c020f176b4))
+
+
 ## v1.3.0 (2026-05-21)
 
 ### Chores
