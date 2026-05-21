@@ -31,20 +31,16 @@ spec:
                 name: comment-commander
           env:
             # SSH signing key comes from 1Password (same key Caleb signs
-            # commits with locally). The 1Password operator syncs the item
-            # in onepassworditem.yaml into the Secret `comment-commander-
-            # signing-key`. K8s Secret keys must match [-._a-zA-Z0-9]+ — the
-            # operator sanitizes the SSH Key item's "private key" field
-            # label by replacing the space with an underscore. If a different
-            # version of the operator produces a different name, run
-            #   kubectl -n comment-commander get secret comment-commander-signing-key \
-            #     -o jsonpath='{.data}' | jq 'keys'
-            # and update this `key` value accordingly.
+            # commits with locally). The 1Password operator syncs the SSH
+            # Key item into Secret `comment-commander-signing-key`. Verified
+            # the operator produces these keys: fingerprint, key-generated-on,
+            # key-type, private-key, public-key. Spaces in field labels are
+            # mapped to hyphens — so "private key" → `private-key`.
             - name: SSH_SIGNING_PRIVATE_KEY
               valueFrom:
                 secretKeyRef:
                   name: comment-commander-signing-key
-                  key: private_key
+                  key: private-key
             # Non-sensitive identity + behaviour. Defaults mirror
             # ~/repos/magmamoose/.gitconfig, so verified-commit attribution
             # works without ever touching the secret store.
