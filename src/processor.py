@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -112,11 +113,22 @@ def process_jobs(
     if not jobs:
         return
     first = jobs[0]
+    logger.info(
+        "processing webhook delivery=%s repo=%s pr=%s jobs=%d",
+        delivery, first.base_repo.full_name, first.pr_number, len(jobs),
+    )
     with GitHubClient(settings.github_pat) as gh:
         comments = _collect_comments(jobs, gh, settings)
         if not comments:
-            logger.info("no_actionable_comments", extra={"delivery": delivery})
+            logger.info(
+                "no actionable comments delivery=%s repo=%s pr=%s",
+                delivery, first.base_repo.full_name, first.pr_number,
+            )
             return
+        logger.info(
+            "collected %d Copilot comment(s) delivery=%s repo=%s pr=%s",
+            len(comments), delivery, first.base_repo.full_name, first.pr_number,
+        )
         _process_pr(
             base_repo=first.base_repo,
             head_repo=first.head_repo,
@@ -179,18 +191,31 @@ def _process_pr(
             thread = None
         if thread and thread.is_resolved:
             logger.info(
-                "thread_already_resolved",
-                extra={"delivery": delivery, "comment_id": comment.id},
+                "skipping resolved thread comment_id=%s pr=%s repo=%s",
+                comment.id, pr_number, base_repo.full_name,
             )
             continue
         pending.append((comment, thread))
 
     if not pending:
+        logger.info(
+            "all threads resolved already pr=%s repo=%s",
+            pr_number, base_repo.full_name,
+        )
         return
+
+    logger.info(
+        "pending comments after thread filter pending=%d pr=%s repo=%s",
+        len(pending), pr_number, base_repo.full_name,
+    )
 
     with tempfile.TemporaryDirectory(prefix="comment-commander-") as tmp:
         repo_dir = Path(tmp) / "repo"
         _clone(head_repo, head_branch, repo_dir, settings)
+        logger.info(
+            "cloned repo=%s branch=%s dir=%s",
+            head_repo.full_name, head_branch, repo_dir,
+        )
         configure_repo_signing(
             repo_dir,
             signing_key_path,
@@ -202,8 +227,16 @@ def _process_pr(
         committed_any = False
 
         for comment, thread in pending:
+            logger.info(
+                "processing comment id=%s path=%s line=%s",
+                comment.id, comment.path, comment.line,
+            )
             files = _gather_files_for_comment(repo_dir, comment, settings)
             if files is None:
+                logger.warning(
+                    "could not read commented file comment_id=%s path=%s",
+                    comment.id, comment.path,
+                )
                 replies.append((
                     comment,
                     thread,
@@ -219,7 +252,7 @@ def _process_pr(
                     files=files,
                 ))
             except LLMError as exc:
-                logger.warning("llm_failure: %s", exc)
+                logger.warning("LLM call failed comment_id=%s: %s", comment.id, exc)
                 replies.append((
                     comment,
                     thread,
@@ -227,6 +260,11 @@ def _process_pr(
                     False,
                 ))
                 continue
+
+            logger.info(
+                "llm decision comment_id=%s decision=%s files=%d",
+                comment.id, decision.decision, len(decision.files),
+            )
 
             if decision.decision == "skip":
                 replies.append((
@@ -248,6 +286,10 @@ def _process_pr(
                 continue
 
             applied = _apply_files(repo_dir, decision.files)
+            logger.info(
+                "applied file changes comment_id=%s changed=%d paths=%s",
+                comment.id, len(applied), [c.path for c in applied],
+            )
             if not applied:
                 replies.append((
                     comment,
@@ -259,18 +301,18 @@ def _process_pr(
 
             if settings.dry_run:
                 logger.info(
-                    "dry_run_fix",
-                    extra={
-                        "delivery": delivery,
-                        "comment_id": comment.id,
-                        "files": [f.path for f in applied],
-                    },
+                    "DRY_RUN — skipping commit comment_id=%s files=%s",
+                    comment.id, [f.path for f in applied],
                 )
                 _reset_repo(repo_dir)
                 replies.append((comment, thread, decision.reply or "Dry run: change preview only.", False))
                 continue
 
             sha = _commit_signed(repo_dir, decision, settings)
+            logger.info(
+                "signed commit sha=%s subject=%r comment_id=%s",
+                sha[:7], _commit_subject(decision), comment.id,
+            )
             committed_any = True
             replies.append((
                 comment,
@@ -281,15 +323,28 @@ def _process_pr(
 
         if committed_any:
             _push(repo_dir, head_branch)
+            logger.info("pushed branch=%s repo=%s", head_branch, head_repo.full_name)
 
         for comment, thread, body, resolve in replies:
+            replied = False
+            resolved = False
             try:
                 if body.strip():
                     gh.reply_to_comment(base_repo, pr_number, comment.id, body[:2000])
+                    replied = True
                 if resolve and thread and not thread.is_resolved:
                     gh.resolve_thread(thread.id)
+                    resolved = True
             except GitHubError as exc:
-                logger.warning("reply_or_resolve_failed: %s", exc)
+                logger.warning(
+                    "reply/resolve failed comment_id=%s: %s",
+                    comment.id, exc,
+                )
+                continue
+            logger.info(
+                "thread handled comment_id=%s replied=%s resolved=%s",
+                comment.id, replied, resolved,
+            )
 
 
 def _context_for(
@@ -406,9 +461,31 @@ def _redact_pat(arg: str) -> str:
     return arg
 
 
+_CONVENTIONAL_COMMIT_TYPES = (
+    "feat", "fix", "chore", "refactor", "docs", "test",
+    "style", "perf", "build", "ci", "revert",
+)
+_CONVENTIONAL_COMMIT_RE = re.compile(
+    r"^(" + "|".join(_CONVENTIONAL_COMMIT_TYPES) + r")(\([^)]+\))?!?:\s+\S"
+)
+
+
 def _commit_subject(decision: Decision) -> str:
-    subject = (decision.commit_message or "Address PR review feedback").splitlines()[0].strip()
-    return subject or "Address PR review feedback"
+    """Normalise the LLM's commit subject into a Conventional Commits header.
+
+    The system prompt instructs the model to comply, but we don't trust
+    that — when it forgets, prefix `fix:` (most Copilot findings are
+    bug fixes) and lower-case the first letter so the subject reads
+    naturally after the colon.
+    """
+    lines = (decision.commit_message or "").splitlines()
+    raw = (lines[0] if lines else "").strip().rstrip(".")
+    if not raw:
+        return "fix: address PR review feedback"
+    if _CONVENTIONAL_COMMIT_RE.match(raw):
+        return raw
+    head = raw[0].lower() + raw[1:] if raw[0].isupper() else raw
+    return f"fix: {head}"
 
 
 def _parse_repo(value: Any) -> RepositoryRef | None:

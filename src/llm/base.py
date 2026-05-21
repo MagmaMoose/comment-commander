@@ -60,7 +60,16 @@ SYSTEM_PROMPT = (
     "files when an edit requires it (for example a caller plus its test). "
     "If the comment is wrong, obsolete, stylistic noise, or not safely fixable "
     "with the provided context, do not change code. Never mention AI, "
-    "automation, webhooks, or bots in replies or commit messages."
+    "automation, webhooks, or bots in replies or commit messages. "
+    "Commit messages MUST follow the Conventional Commits 1.0.0 spec: "
+    "`<type>(<scope>)?: <subject>`. Use one of these types: "
+    "feat, fix, chore, refactor, docs, test, style, perf, build, ci. "
+    "Subject is imperative, no trailing period, ideally <=72 chars. "
+    "If a scope is obvious from the changed file (e.g. the directory name "
+    "or the kustomize app), include it; otherwise omit. Examples: "
+    "`fix(atlantis): mount GCP SA key so terragrunt can read GCS state`, "
+    "`chore(deps): pin mikrotik-minder Helm chart to 0.1.0`, "
+    "`feat: add comment-commander GitRepository`."
 )
 
 
@@ -69,7 +78,7 @@ def build_user_prompt(context: CommentContext) -> str:
         "required_response_shape": {
             "decision": "fix | dismiss | skip",
             "reply": "short markdown body for the GitHub review thread",
-            "commitMessage": "required for fix; natural imperative subject line",
+            "commitMessage": "required for fix; Conventional Commits 1.0.0 — `<type>(<scope>)?: <subject>` (types: feat, fix, chore, refactor, docs, test, style, perf, build, ci)",
             "files": [
                 {
                     "path": "repo-relative path (must match one of the provided files OR a sibling clearly required by the fix)",
