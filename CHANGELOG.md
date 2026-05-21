@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.5.0 (2026-05-21)
+
+### Chores
+
+- Bump image tag to v1.4.0
+  ([`c374472`](https://github.com/MagmaMoose/comment-commander/commit/c374472ad91edb867955cd6011e45590ece08b5d))
+
+### Features
+
+- Multi-instance (GHE), INVOLVED_USERS whitelist, POST /setup-webhook
+  ([`f45c1ec`](https://github.com/MagmaMoose/comment-commander/commit/f45c1ecf875c19f4a0f7bbf72100c66a4e939c5c))
+
+
 ## v1.4.0 (2026-05-21)
 
 ### Chores
