@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.mypy_cache/
+
+# Local secrets and decrypted overlays
+.env
+secret.yaml
+k8s/overlays/*/secret.yaml
+
+# IDE
+.idea/
+.vscode/
+
+# Build/log noise
+dist/
+*.log

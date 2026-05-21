@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: comment-commander
+  labels:
+    app: comment-commander
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # Single writer for git push + signing key.
+  selector:
+    matchLabels:
+      app: comment-commander
+  template:
+    metadata:
+      labels:
+        app: comment-commander
+    spec:
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+      containers:
+        - name: comment-commander
+          image: ghcr.io/magmamoose/comment-commander:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+              name: http
+          # Non-signing secrets come from OCI Vault via ExternalSecret.
+          envFrom:
+            - secretRef:
+                name: comment-commander
+          env:
+            # SSH signing key comes from 1Password (same key Caleb signs
+            # commits with locally). The 1Password operator syncs the item
+            # in onepassworditem.yaml into the Secret `comment-commander-
+            # signing-key`; the SSH Key item's "private key" field becomes
+            # the `private key` key in that Secret.
+            - name: SSH_SIGNING_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: comment-commander-signing-key
+                  key: private key
+            # Non-sensitive identity + behaviour. Defaults mirror
+            # ~/repos/magmamoose/.gitconfig, so verified-commit attribution
+            # works without ever touching the secret store.
+            - name: GIT_AUTHOR_NAME
+              value: "CalebSargeant"
+            - name: GIT_AUTHOR_EMAIL
+              value: "4991715+CalebSargeant@users.noreply.github.com"
+            - name: LLM_PROVIDER
+              value: "deepseek"
+            - name: LLM_MODEL
+              value: "deepseek-chat"
+            - name: BOT_LOGINS
+              value: "copilot[bot],github-copilot[bot]"
+            # ALLOWED_REPOSITORIES: comma-separated allow-list ("" = all).
+            - name: ALLOWED_REPOSITORIES
+              value: ""
+            - name: MAX_FILE_BYTES
+              value: "180000"
+            - name: MAX_COMMENTS_PER_EVENT
+              value: "10"
+            - name: DRY_RUN
+              value: "false"
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: DEDUPE_DB_PATH
+              value: "/var/lib/comment-commander/deliveries.db"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "1"
+          volumeMounts:
+            - name: dedupe
+              mountPath: /var/lib/comment-commander
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: dedupe
+          persistentVolumeClaim:
+            claimName: comment-commander-dedupe
+        - name: tmp
+          emptyDir: {}
+      restartPolicy: Always

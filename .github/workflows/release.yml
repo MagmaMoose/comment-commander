@@ -1,0 +1,33 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Force a bump even if no qualifying conventional commits exist (leave blank to let the tool decide)'
+        required: false
+        type: choice
+        default: ''
+        options:
+          - ''
+          - patch
+          - minor
+          - major
+  push:
+    branches: [main]
+    paths-ignore: ['.gitignore', 'CHANGELOG.md']
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: calebsargeant/semantic-release@v1
+        with:
+          mode: release
+          image_name: comment-commander
+          force-bump: ${{ inputs.bump || '' }}

@@ -1,0 +1,10 @@
+# Minimal cloudflared tunnel config. Point your GitHub webhook at
+# https://comment-commander.<your-domain>/webhook. cloudflared resolves to the
+# in-cluster ClusterIP Service created by k8s/base/service.yaml.
+tunnel: comment-commander
+credentials-file: /etc/cloudflared/creds.json
+
+ingress:
+  - hostname: comment-commander.example.com
+    service: http://comment-commander.comment-commander.svc.cluster.local:8000
+  - service: http_status:404

@@ -1,0 +1,10 @@
+[project]
+name = "comment-commander"
+version = "0.1.0"
+description = "Self-hosted webhook that triages and fixes GitHub Copilot PR review comments with verified commits."
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
