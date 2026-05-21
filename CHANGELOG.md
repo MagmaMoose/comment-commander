@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.5.1 (2026-05-21)
+
+### Bug Fixes
+
+- **setup-webhook**: Idempotent + propagate upstream 4xx status
+  ([`4b57b39`](https://github.com/MagmaMoose/comment-commander/commit/4b57b39dfe0d520882c5401ba86a0e7ce7a424d3))
+
+### Chores
+
+- Bump image tag to v1.5.0
+  ([`3b96758`](https://github.com/MagmaMoose/comment-commander/commit/3b967584d69d392da97e5ea7466bcdb865df15f1))
+
+
 ## v1.5.0 (2026-05-21)
 
 ### Chores
