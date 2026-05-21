@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.0.3 (2026-05-21)
+
+### Bug Fixes
+
+- **k8s**: Point OnePasswordItem at the new Tech vault
+  ([`b0dda25`](https://github.com/MagmaMoose/comment-commander/commit/b0dda257aa2785ad1a31ea0be496ea3129a7c844))
+
+### Chores
+
+- Bump image tag to v1.0.1
+  ([`09938ac`](https://github.com/MagmaMoose/comment-commander/commit/09938ac49729eb44c9cf681774d2134b2535f26a))
+
+
 ## v1.0.2 (2026-05-21)
 
 ### Bug Fixes
