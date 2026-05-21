@@ -2,6 +2,22 @@
 
 <!-- version list -->
 
+## v1.2.0 (2026-05-21)
+
+### Chores
+
+- Bump image tag to v1.1.4
+  ([`2b1522c`](https://github.com/MagmaMoose/comment-commander/commit/2b1522ca18f8952b20b11012d32cdf32817807b5))
+
+### Features
+
+- **commits**: Enforce Conventional Commits 1.0.0
+  ([`a8c6a43`](https://github.com/MagmaMoose/comment-commander/commit/a8c6a43ff90f744c3edc7146457f97b87af3cc1e))
+
+- **observability**: Structured event logs at every stage, quieter health probes
+  ([`a8c6a43`](https://github.com/MagmaMoose/comment-commander/commit/a8c6a43ff90f744c3edc7146457f97b87af3cc1e))
+
+
 ## v1.1.4 (2026-05-21)
 
 ### Bug Fixes
