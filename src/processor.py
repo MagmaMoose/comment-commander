@@ -359,53 +359,51 @@ def _apply_files(repo_dir: Path, files: list[FileChange]) -> list[FileChange]:
 def _clone(repo: RepositoryRef, branch: str, dest: Path, settings: Settings) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     url = f"https://x-access-token:{settings.github_pat}@github.com/{repo.owner}/{repo.repo}.git"
-    subprocess.run(
-        ["git", "clone", "--depth", "1", "--branch", branch, url, str(dest)],
-        check=True,
-        capture_output=True,
-    )
+    _run(["git", "clone", "--depth", "1", "--branch", branch, url, str(dest)])
 
 
 def _commit_signed(repo_dir: Path, decision: Decision, settings: Settings) -> str:
-    subprocess.run(
-        ["git", "-C", str(repo_dir), "add", "--all"],
-        check=True,
-        capture_output=True,
-    )
+    _run(["git", "-C", str(repo_dir), "add", "--all"])
     message = _commit_subject(decision)
-    subprocess.run(
-        ["git", "-C", str(repo_dir), "commit", "-S", "-m", message],
-        check=True,
-        capture_output=True,
-    )
-    sha = subprocess.run(
-        ["git", "-C", str(repo_dir), "rev-parse", "HEAD"],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    return sha
+    _run(["git", "-C", str(repo_dir), "commit", "-S", "-m", message])
+    return _run(["git", "-C", str(repo_dir), "rev-parse", "HEAD"]).stdout.strip()
 
 
 def _push(repo_dir: Path, branch: str) -> None:
-    subprocess.run(
-        ["git", "-C", str(repo_dir), "push", "origin", f"HEAD:refs/heads/{branch}"],
-        check=True,
-        capture_output=True,
-    )
+    _run(["git", "-C", str(repo_dir), "push", "origin", f"HEAD:refs/heads/{branch}"])
 
 
 def _reset_repo(repo_dir: Path) -> None:
-    subprocess.run(
-        ["git", "-C", str(repo_dir), "reset", "--hard", "HEAD"],
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(repo_dir), "clean", "-fd"],
-        check=True,
-        capture_output=True,
-    )
+    _run(["git", "-C", str(repo_dir), "reset", "--hard", "HEAD"])
+    _run(["git", "-C", str(repo_dir), "clean", "-fd"])
+
+
+def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    """subprocess.run wrapper that captures + logs stderr on non-zero exits.
+
+    Without this, git/ssh-keygen failures bubble up as opaque
+    `CalledProcessError: ... returned non-zero exit status 128` with no
+    way to see what actually went wrong.
+    """
+    try:
+        return subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        # `git clone` with a URL containing the PAT must not leak it.
+        sanitised = [_redact_pat(a) for a in cmd]
+        logger.error(
+            "subprocess_failed cmd=%r rc=%s stderr=%s stdout=%s",
+            sanitised,
+            exc.returncode,
+            (exc.stderr or "").strip(),
+            (exc.stdout or "").strip(),
+        )
+        raise
+
+
+def _redact_pat(arg: str) -> str:
+    if "x-access-token:" in arg:
+        return "https://x-access-token:***@github.com/.../...git"
+    return arg
 
 
 def _commit_subject(decision: Decision) -> str:
