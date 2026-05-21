@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.1.2 (2026-05-21)
+
+### Bug Fixes
+
+- **observability**: Log full traceback when background webhook task fails
+  ([`8d81722`](https://github.com/MagmaMoose/comment-commander/commit/8d817223a23702ccba764e0e7070d38a228e114c))
+
+### Chores
+
+- Bump image tag to v1.1.1
+  ([`aee0275`](https://github.com/MagmaMoose/comment-commander/commit/aee0275c9686c3df4ba8cbf1c2c2d4c992b055ca))
+
+
 ## v1.1.1 (2026-05-21)
 
 ### Bug Fixes
