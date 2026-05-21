@@ -19,7 +19,9 @@ USER_AGENT = "magmamoose-comment-commander"
 
 
 class GitHubError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 @dataclass(frozen=True)
@@ -371,6 +373,31 @@ class GitHubClient:
             page += 1
         return out
 
+    def list_repo_hooks(self, repo: RepositoryRef) -> list[dict[str, Any]]:
+        return self._list_hooks(f"/repos/{quote(repo.owner)}/{quote(repo.repo)}/hooks")
+
+    def list_org_hooks(self, org: str) -> list[dict[str, Any]]:
+        return self._list_hooks(f"/orgs/{quote(org)}/hooks")
+
+    def _list_hooks(self, path: str) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            response = self._client.get(path, params={"per_page": 100, "page": page})
+            if not response.is_success:
+                raise GitHubError(
+                    f"list_hooks failed ({response.status_code}): {response.text[:300]}",
+                    status_code=response.status_code,
+                )
+            items = response.json()
+            if not isinstance(items, list) or not items:
+                break
+            out.extend(item for item in items if isinstance(item, dict))
+            if len(items) < 100:
+                break
+            page += 1
+        return out
+
     def create_repo_hook(
         self,
         repo: RepositoryRef,
@@ -419,7 +446,8 @@ class GitHubClient:
         response = self._client.post(path, json=payload)
         if not response.is_success:
             raise GitHubError(
-                f"create_hook failed ({response.status_code}): {response.text[:300]}"
+                f"create_hook failed ({response.status_code}): {response.text[:300]}",
+                status_code=response.status_code,
             )
         body = response.json()
         if not isinstance(body, dict):

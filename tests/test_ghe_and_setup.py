@@ -174,6 +174,9 @@ def test_setup_webhook_creates_repo_hook(settings, stub_provider, deliveries):
     import respx
     client = _client(settings, stub_provider, deliveries)
     with respx.mock(base_url="https://api.github.com") as mock:
+        mock.get("/repos/CalebSargeant/infra/hooks").mock(
+            return_value=httpx.Response(200, json=[])
+        )
         route = mock.post("/repos/CalebSargeant/infra/hooks").mock(
             return_value=httpx.Response(201, json={"id": 12345})
         )
@@ -200,6 +203,9 @@ def test_setup_webhook_creates_org_hook(settings, stub_provider, deliveries):
     import respx
     client = _client(settings, stub_provider, deliveries)
     with respx.mock(base_url="https://api.github.com") as mock:
+        mock.get("/orgs/magmamoose/hooks").mock(
+            return_value=httpx.Response(200, json=[])
+        )
         route = mock.post("/orgs/magmamoose/hooks").mock(
             return_value=httpx.Response(201, json={"id": 999})
         )
@@ -210,6 +216,64 @@ def test_setup_webhook_creates_org_hook(settings, stub_provider, deliveries):
         )
     assert response.status_code == 201
     assert route.called
+
+
+def test_setup_webhook_is_idempotent_on_existing_hook(settings, stub_provider, deliveries):
+    """Second call must NOT 502 — it should return the pre-existing hook."""
+    import respx
+    client = _client(settings, stub_provider, deliveries)
+    public = settings.public_webhook_url
+    existing_hook = {
+        "id": 628163836,
+        "events": ["pull_request_review", "pull_request_review_comment"],
+        "config": {"url": public, "content_type": "json"},
+    }
+    with respx.mock(base_url="https://api.github.com", assert_all_called=False) as mock:
+        list_route = mock.get("/orgs/magmamoose/hooks").mock(
+            return_value=httpx.Response(200, json=[existing_hook])
+        )
+        create_route = mock.post("/orgs/magmamoose/hooks")
+        response = client.post(
+            "/setup-webhook",
+            json={"target": "https://github.com/magmamoose"},
+            headers={"X-Trigger-Token": settings.github_webhook_secret},
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "already_exists"
+    assert body["hook_id"] == 628163836
+    assert list_route.called
+    assert not create_route.called  # never tried to create a duplicate
+
+
+def test_setup_webhook_propagates_403_saml_block(settings, stub_provider, deliveries):
+    """GHE PATs need per-org SAML SSO authorisation. The 403 must reach the
+    caller verbatim — 502 hides the actionable message."""
+    import respx
+    ghe_settings = replace(
+        settings,
+        ghe_host="pinkroccade.ghe.com",
+        ghe_pat="ghe-pat",
+        ghe_author_name="sargea50",
+        ghe_author_email="Caleb.sargeant@pinkroccade.nl",
+    )
+    client = _client(ghe_settings, stub_provider, deliveries)
+    saml_message = "Resource protected by organization SAML enforcement. You must grant your Personal Access token access to an organization within this enterprise."
+    with respx.mock(base_url="https://pinkroccade.ghe.com/api/v3") as mock:
+        mock.get("/repos/samenlevingszaken/foo/hooks").mock(
+            return_value=httpx.Response(403, json={"message": saml_message})
+        )
+        # In case listing somehow succeeds, the create call must also 403.
+        mock.post("/repos/samenlevingszaken/foo/hooks").mock(
+            return_value=httpx.Response(403, json={"message": saml_message})
+        )
+        response = client.post(
+            "/setup-webhook",
+            json={"target": "https://pinkroccade.ghe.com/samenlevingszaken/foo"},
+            headers={"X-Trigger-Token": settings.github_webhook_secret},
+        )
+    assert response.status_code == 403, response.text
+    assert "SAML" in response.text
 
 
 def test_setup_webhook_routes_to_ghe(settings, stub_provider, deliveries):
@@ -224,6 +288,9 @@ def test_setup_webhook_routes_to_ghe(settings, stub_provider, deliveries):
     )
     client = _client(ghe_settings, stub_provider, deliveries)
     with respx.mock(base_url="https://pinkroccade.ghe.com/api/v3") as mock:
+        mock.get("/repos/some-org/some-repo/hooks").mock(
+            return_value=httpx.Response(200, json=[])
+        )
         route = mock.post("/repos/some-org/some-repo/hooks").mock(
             return_value=httpx.Response(201, json={"id": 777})
         )

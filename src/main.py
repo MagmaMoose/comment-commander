@@ -319,17 +319,40 @@ def create_app(
             )
 
         events = ["pull_request_review", "pull_request_review_comment"]
+        scope = f"{owner}/{maybe_repo}" if maybe_repo is not None else owner
         try:
             with GitHubClient.for_instance(instance) as gh:
-                if maybe_repo is not None:
-                    from github_client import RepositoryRef
+                from github_client import RepositoryRef
+                repo_ref = RepositoryRef(owner=owner, repo=maybe_repo) if maybe_repo else None
+                # Idempotency: if a hook already targets our PUBLIC_WEBHOOK_URL,
+                # return that one instead of failing with 422 "already exists".
+                existing = _find_existing_hook(
+                    gh, repo_ref, owner, settings.public_webhook_url,
+                )
+                if existing is not None:
+                    logger.info(
+                        "webhook already present instance=%s scope=%s hook_id=%s",
+                        instance.name, scope, existing.get("id"),
+                    )
+                    return Response(
+                        content=json.dumps({
+                            "status": "already_exists",
+                            "instance": instance.name,
+                            "scope": scope,
+                            "hook_id": existing.get("id"),
+                            "webhook_url": settings.public_webhook_url,
+                            "events": existing.get("events") or events,
+                        }),
+                        media_type="application/json",
+                        status_code=200,
+                    )
+                if repo_ref is not None:
                     result = gh.create_repo_hook(
-                        RepositoryRef(owner=owner, repo=maybe_repo),
+                        repo_ref,
                         webhook_url=settings.public_webhook_url,
                         secret=settings.github_webhook_secret,
                         events=events,
                     )
-                    scope = f"{owner}/{maybe_repo}"
                 else:
                     result = gh.create_org_hook(
                         owner,
@@ -337,10 +360,14 @@ def create_app(
                         secret=settings.github_webhook_secret,
                         events=events,
                     )
-                    scope = owner
         except GitHubError as exc:
-            logger.warning("setup-webhook failed scope=%s: %s", scope if 'scope' in dir() else target, exc)
-            raise HTTPException(status_code=502, detail=f"github_error: {exc}") from exc
+            logger.warning("setup-webhook failed scope=%s: %s", scope, exc)
+            # Pass through 4xx so the caller can act on it (e.g. SAML SSO
+            # 403 telling them to authorise the PAT for an enterprise org).
+            status = exc.status_code or 502
+            if status not in (401, 403, 404, 422):
+                status = 502
+            raise HTTPException(status_code=status, detail=str(exc)) from exc
 
         logger.info(
             "webhook provisioned instance=%s scope=%s hook_id=%s url=%s events=%s",
@@ -361,6 +388,21 @@ def create_app(
         )
 
     return app
+
+
+def _find_existing_hook(gh, repo_ref, org_owner: str, webhook_url: str):
+    """Return any existing hook whose `config.url` matches `webhook_url`."""
+    try:
+        hooks = gh.list_repo_hooks(repo_ref) if repo_ref else gh.list_org_hooks(org_owner)
+    except GitHubError:
+        # If listing isn't permitted (e.g. PAT lacks read scope on hooks),
+        # fall through and let the create call decide.
+        return None
+    for hook in hooks:
+        config = hook.get("config") if isinstance(hook, dict) else None
+        if isinstance(config, dict) and config.get("url") == webhook_url:
+            return hook
+    return None
 
 
 def _host_from_pr_url(url: str) -> str | None:
