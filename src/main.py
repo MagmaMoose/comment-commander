@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import traceback
 from typing import Any
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request, Response
@@ -110,10 +109,7 @@ def create_app(
                 signing_key_path=signing_key_path,
             )
         except Exception:  # noqa: BLE001 - background task must not crash the server
-            logger.error(
-                "background_task_failed",
-                extra={"delivery": delivery, "trace": traceback.format_exc()},
-            )
+            logger.exception("background_task_failed delivery=%s", delivery)
 
     return app
 
