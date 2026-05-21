@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.1.1 (2026-05-21)
+
+### Bug Fixes
+
+- **bot**: Match Copilot's Code Review identity (login `Copilot`) and lower-case logins
+  ([`e014d9a`](https://github.com/MagmaMoose/comment-commander/commit/e014d9a8b7f9c4ff27739dc0659805e2695a352f))
+
+
 ## v1.1.0 (2026-05-21)
 
 ### Bug Fixes
