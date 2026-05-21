@@ -13,7 +13,7 @@ from dataclasses import dataclass
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_BOT_LOGINS = "copilot[bot],github-copilot[bot]"
+DEFAULT_BOT_LOGINS = "Copilot,copilot[bot],github-copilot[bot]"
 DEFAULT_MAX_FILE_BYTES = 180_000
 DEFAULT_MAX_COMMENTS_PER_EVENT = 5
 
@@ -60,7 +60,7 @@ class Settings:
             llm_model=os.environ.get("LLM_MODEL", "").strip() or _default_model_for(provider),
             llm_api_key=_require("LLM_API_KEY"),
             llm_base_url=(os.environ.get("LLM_BASE_URL") or None),
-            bot_logins=_parse_set(os.environ.get("BOT_LOGINS") or DEFAULT_BOT_LOGINS),
+            bot_logins=_parse_login_set(os.environ.get("BOT_LOGINS") or DEFAULT_BOT_LOGINS),
             allowed_repositories=_parse_set(os.environ.get("ALLOWED_REPOSITORIES") or ""),
             max_file_bytes=_positive_int(os.environ.get("MAX_FILE_BYTES"), DEFAULT_MAX_FILE_BYTES),
             max_comments_per_event=_positive_int(
@@ -80,6 +80,11 @@ def _require(name: str) -> str:
 
 def _parse_set(value: str) -> frozenset[str]:
     return frozenset(part.strip() for part in value.split(",") if part.strip())
+
+
+def _parse_login_set(value: str) -> frozenset[str]:
+    """GitHub usernames are case-insensitive — normalise to lower."""
+    return frozenset(part.strip().lower() for part in value.split(",") if part.strip())
 
 
 def _positive_int(value: str | None, fallback: int) -> int:

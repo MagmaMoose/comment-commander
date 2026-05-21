@@ -68,7 +68,7 @@ def extract_jobs(payload: dict[str, Any], event: str, settings: Settings) -> lis
         if not isinstance(comment_data, dict):
             return []
         comment = parse_review_comment(comment_data)
-        if (comment.user_login or "") not in settings.bot_logins:
+        if (comment.user_login or "").lower() not in settings.bot_logins:
             return []
         return [ReviewJob(
             base_repo=repo,
@@ -87,7 +87,7 @@ def extract_jobs(payload: dict[str, Any], event: str, settings: Settings) -> lis
             return []
         review_user = (review.get("user") or {}).get("login") if isinstance(review.get("user"), dict) else None
         review_id = review.get("id")
-        if not isinstance(review_id, int) or (review_user or "") not in settings.bot_logins:
+        if not isinstance(review_id, int) or (review_user or "").lower() not in settings.bot_logins:
             return []
         return [ReviewJob(
             base_repo=repo,
@@ -151,7 +151,7 @@ def _collect_comments(
         for comment in review_comments:
             if comment.id in seen:
                 continue
-            if (comment.user_login or "") in settings.bot_logins:
+            if (comment.user_login or "").lower() in settings.bot_logins:
                 out.append(comment)
                 seen.add(comment.id)
     return out[: settings.max_comments_per_event]

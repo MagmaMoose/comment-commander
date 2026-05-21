@@ -19,6 +19,22 @@ def test_extracts_copilot_comment(settings):
     assert jobs[0].comment.id == 99
 
 
+def test_extracts_copilot_code_review_identity(settings):
+    """The newer Copilot Code Review surface uses login `Copilot` (no [bot] suffix, capitalised)."""
+    payload = comment_payload(
+        comment={
+            "id": 101,
+            "node_id": "PRRC_101",
+            "user": {"login": "Copilot"},
+            "body": "Consider null checks here.",
+            "path": "src/app.ts",
+        }
+    )
+    jobs = extract_jobs(payload, "pull_request_review_comment", settings)
+    assert len(jobs) == 1
+    assert jobs[0].comment.user_login == "Copilot"
+
+
 def test_ignores_disallowed_repository(settings):
     blocked = dict(settings.__dict__)
     blocked["allowed_repositories"] = frozenset({"some-other/repo"})

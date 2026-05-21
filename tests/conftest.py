@@ -29,7 +29,7 @@ def settings(tmp_path: Path) -> Settings:
         llm_model="deepseek-chat",
         llm_api_key="llm-api-key",
         llm_base_url=None,
-        bot_logins=frozenset({"copilot[bot]"}),
+        bot_logins=frozenset({"copilot[bot]", "copilot"}),
         allowed_repositories=frozenset(),
         max_file_bytes=180_000,
         max_comments_per_event=5,

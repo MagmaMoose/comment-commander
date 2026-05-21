@@ -52,8 +52,13 @@ spec:
               value: "deepseek"
             - name: LLM_MODEL
               value: "deepseek-chat"
+            # Copilot's review-author login varies. The legacy bot uses
+            # `copilot[bot]` / `github-copilot[bot]`; the newer Copilot
+            # Code Review surface posts as plain `Copilot`. Matching in
+            # src/processor.py is case-insensitive, so casing here just
+            # documents what's expected.
             - name: BOT_LOGINS
-              value: "copilot[bot],github-copilot[bot]"
+              value: "Copilot,copilot[bot],github-copilot[bot]"
             # ALLOWED_REPOSITORIES: comma-separated allow-list ("" = all).
             - name: ALLOWED_REPOSITORIES
               value: ""
