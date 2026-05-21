@@ -42,6 +42,7 @@ class ReviewComment:
     diff_hunk: str | None
     line: int | None
     side: str | None
+    in_reply_to_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -117,6 +118,45 @@ class GitHubClient:
                 f"list_review_comments failed ({response.status_code}): {response.text[:200]}"
             )
         return [parse_review_comment(entry) for entry in response.json() if isinstance(entry, dict)]
+
+    def list_pr_review_comments(
+        self, repo: RepositoryRef, pr_number: int
+    ) -> list[ReviewComment]:
+        """List ALL review comments on a PR (not scoped to a single review)."""
+        out: list[ReviewComment] = []
+        page = 1
+        while True:
+            response = self._client.get(
+                f"/repos/{quote(repo.owner)}/{quote(repo.repo)}/pulls/{pr_number}/comments",
+                params={"per_page": 100, "page": page},
+            )
+            if not response.is_success:
+                raise GitHubError(
+                    f"list_pr_review_comments failed ({response.status_code}): {response.text[:200]}"
+                )
+            items = response.json()
+            if not isinstance(items, list) or not items:
+                break
+            for entry in items:
+                if isinstance(entry, dict):
+                    out.append(parse_review_comment(entry))
+            if len(items) < 100:
+                break
+            page += 1
+        return out
+
+    def get_pull_request(self, repo: RepositoryRef, pr_number: int) -> dict[str, Any]:
+        response = self._client.get(
+            f"/repos/{quote(repo.owner)}/{quote(repo.repo)}/pulls/{pr_number}"
+        )
+        if not response.is_success:
+            raise GitHubError(
+                f"get_pull_request failed ({response.status_code}): {response.text[:200]}"
+            )
+        body = response.json()
+        if not isinstance(body, dict):
+            raise GitHubError("get_pull_request returned non-object payload")
+        return body
 
     def reply_to_comment(
         self, repo: RepositoryRef, pr_number: int, comment_id: int, body: str
@@ -216,6 +256,7 @@ class GitHubClient:
 
 def parse_review_comment(payload: dict[str, Any]) -> ReviewComment:
     user = payload.get("user")
+    in_reply = payload.get("in_reply_to_id")
     return ReviewComment(
         id=int(payload["id"]),
         node_id=payload.get("node_id") if isinstance(payload.get("node_id"), str) else None,
@@ -225,6 +266,7 @@ def parse_review_comment(payload: dict[str, Any]) -> ReviewComment:
         diff_hunk=payload.get("diff_hunk") if isinstance(payload.get("diff_hunk"), str) else None,
         line=payload.get("line") if isinstance(payload.get("line"), int) else None,
         side=payload.get("side") if isinstance(payload.get("side"), str) else None,
+        in_reply_to_id=in_reply if isinstance(in_reply, int) else None,
     )
 
 

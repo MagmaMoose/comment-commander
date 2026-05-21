@@ -33,8 +33,45 @@ from slack import SlackNotifier
 logger = logging.getLogger(__name__)
 
 
+# Hidden marker appended to every bot reply. Lets the manual-trigger code
+# path skip threads we've already touched without relying on user-name
+# matching (which can't tell the bot's commits/comments apart from Caleb's
+# own, since both use the same identity).
+BOT_MARKER = "<!-- comment-commander -->"
+
+# Accepts:
+#   https://github.com/owner/repo/pull/123
+#   https://github.com/owner/repo/pull/123/files
+#   https://github.com/owner/repo/pull/123#discussion_r456
+# Plus the lighter `owner/repo#123` shorthand.
+_PR_URL_RE = re.compile(
+    r"^(?:https?://github\.com/)?(?P<owner>[^/]+)/(?P<repo>[^/#]+)(?:/pull/|#)(?P<num>\d+)"
+)
+
+
 class ProcessorError(RuntimeError):
     pass
+
+
+def parse_pr_url(value: str) -> tuple[RepositoryRef, int] | None:
+    """Parse a PR URL or owner/repo#N shorthand. Returns None if invalid."""
+    if not isinstance(value, str):
+        return None
+    match = _PR_URL_RE.match(value.strip())
+    if not match:
+        return None
+    return (
+        RepositoryRef(owner=match.group("owner"), repo=match.group("repo")),
+        int(match.group("num")),
+    )
+
+
+def _format_reply_body(body: str) -> str:
+    """Append the bot marker so manual reruns can skip our own replies."""
+    body = body.strip()
+    if not body or BOT_MARKER in body:
+        return body
+    return f"{body}\n\n{BOT_MARKER}"
 
 
 @dataclass(frozen=True)
@@ -119,6 +156,87 @@ def extract_jobs(payload: dict[str, Any], event: str, settings: Settings) -> lis
         )]
 
     return []
+
+
+def process_pr_manual(
+    repo: RepositoryRef,
+    pr_number: int,
+    settings: Settings,
+    *,
+    trigger_id: str,
+    provider: LLMProvider,
+    signing_key_path: str | Path,
+    slack: SlackNotifier | None = None,
+) -> None:
+    """Manual triggered processing — re-walks every unresolved review thread.
+
+    Differences vs the webhook flow:
+    - Author isn't restricted to BOT_LOGINS; any non-bot author counts
+      (humans, Copilot, other review bots).
+    - Thread-reply comments (the ones with in_reply_to_id set) are
+      skipped so we only act on thread starters.
+    - Comments carrying the `BOT_MARKER` are skipped so we don't recurse
+      into our own past replies.
+    - `_process_pr` then drops anything already resolved.
+    """
+    if settings.allowed_repositories and repo.full_name not in settings.allowed_repositories:
+        logger.info(
+            "manual trigger refused — repo not in allow-list trigger=%s repo=%s",
+            trigger_id, repo.full_name,
+        )
+        return
+    logger.info(
+        "manual trigger received trigger=%s repo=%s pr=%s",
+        trigger_id, repo.full_name, pr_number,
+    )
+    with GitHubClient(settings.github_pat) as gh:
+        try:
+            pr = gh.get_pull_request(repo, pr_number)
+        except GitHubError as exc:
+            logger.warning("get_pull_request failed trigger=%s: %s", trigger_id, exc)
+            return
+        head_ref = pr.get("head") or {}
+        head_branch = head_ref.get("ref") if isinstance(head_ref, dict) else None
+        head_repo = _parse_repo(head_ref.get("repo")) if isinstance(head_ref, dict) else None
+        head_repo = head_repo or repo
+        if not isinstance(head_branch, str) or not head_branch:
+            logger.warning(
+                "manual trigger: PR has no head ref trigger=%s repo=%s pr=%s",
+                trigger_id, repo.full_name, pr_number,
+            )
+            return
+
+        try:
+            all_comments = gh.list_pr_review_comments(repo, pr_number)
+        except GitHubError as exc:
+            logger.warning("list_pr_review_comments failed trigger=%s: %s", trigger_id, exc)
+            return
+
+        actionable = [
+            c for c in all_comments
+            if c.in_reply_to_id is None and BOT_MARKER not in c.body
+        ]
+        logger.info(
+            "manual trigger pre-filter total=%d actionable=%d (replies+bot-markers excluded) trigger=%s",
+            len(all_comments), len(actionable), trigger_id,
+        )
+        if not actionable:
+            return
+
+        actionable = actionable[: settings.max_comments_per_event]
+        _process_pr(
+            base_repo=repo,
+            head_repo=head_repo,
+            head_branch=head_branch,
+            pr_number=pr_number,
+            comments=actionable,
+            settings=settings,
+            gh=gh,
+            provider=provider,
+            signing_key_path=signing_key_path,
+            delivery=f"manual:{trigger_id}",
+            slack=slack or SlackNotifier(token=None, channel=None),
+        )
 
 
 def process_jobs(
@@ -352,10 +470,11 @@ def _process_pr(
             replied = False
             resolved = False
             try:
-                if pending_reply.body.strip():
+                marked = _format_reply_body(pending_reply.body)
+                if marked.strip():
                     gh.reply_to_comment(
                         base_repo, pr_number, pending_reply.comment.id,
-                        pending_reply.body[:2000],
+                        marked[:2000],
                     )
                     replied = True
                 if pending_reply.resolve and pending_reply.thread and not pending_reply.thread.is_resolved:

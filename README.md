@@ -19,6 +19,25 @@ For every Copilot review comment on a PR you've subscribed via webhook:
 
 Commits are signed with an SSH ed25519 key that matches `~/.gitconfig`, so they show as verified on GitHub.
 
+## Manual trigger (`POST /process`)
+
+In addition to passively listening for webhooks, you can ask the bot to re-walk an entire PR:
+
+```bash
+curl -X POST https://comment-commander.magmamoose.com/process \
+  -H "X-Trigger-Token: $GITHUB_WEBHOOK_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"pr_url": "https://github.com/CalebSargeant/infra/pull/242"}'
+```
+
+Differences vs the webhook path:
+- Every author counts — humans, Copilot, other review bots — not just the `BOT_LOGINS` allow-list.
+- Thread starters only; reply-comments (`in_reply_to_id` set) are skipped.
+- Bot replies carry a hidden `<!-- comment-commander -->` marker so re-runs ignore them and never loop.
+- Resolved threads are still skipped (same as the webhook flow).
+
+Auth reuses `GITHUB_WEBHOOK_SECRET` (no new vault entry needed). The shorthand form `owner/repo#N` is also accepted.
+
 ## LLM provider
 
 Pluggable via `LLM_PROVIDER`:

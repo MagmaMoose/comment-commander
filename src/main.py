@@ -1,10 +1,12 @@
 """FastAPI entrypoint. Verifies, dedupes, then hands off to the background."""
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +16,7 @@ from config import Settings
 from dedupe import DeliveryStore
 from github_client import verify_signature
 from llm import build_provider
-from processor import extract_jobs, process_jobs
+from processor import extract_jobs, parse_pr_url, process_jobs, process_pr_manual
 from signing import install_ssh_signing_key
 from slack import SlackNotifier
 
@@ -184,6 +186,70 @@ def create_app(
             logger.info("delivery processed delivery=%s", delivery)
         except Exception:  # noqa: BLE001 - background task must not crash the server
             logger.exception("background_task_failed delivery=%s", delivery)
+
+    @app.post("/process")
+    async def manual_process(
+        request: Request,
+        background_tasks: BackgroundTasks,
+        x_trigger_token: str | None = Header(default=None),
+    ) -> Response:
+        """Manual entrypoint — give it a PR URL and it re-walks every
+        unresolved review thread, regardless of who authored each comment.
+
+        Auth: requires `X-Trigger-Token: <GITHUB_WEBHOOK_SECRET>` (same
+        secret as the GitHub webhook — saves a second secret).
+        Body:   {"pr_url": "https://github.com/owner/repo/pull/123"}
+        """
+        if not x_trigger_token or not hmac.compare_digest(
+            x_trigger_token, settings.github_webhook_secret
+        ):
+            logger.warning("rejected /process call with bad token")
+            raise HTTPException(status_code=403, detail="invalid_token")
+
+        try:
+            body = await request.json()
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail=f"invalid_json: {exc}") from exc
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="invalid_body")
+
+        parsed = parse_pr_url(body.get("pr_url") or "")
+        if not parsed:
+            raise HTTPException(status_code=400, detail="invalid_pr_url")
+        repo, pr_number = parsed
+        trigger_id = uuid.uuid4().hex[:12]
+        logger.info(
+            "manual /process accepted trigger=%s repo=%s pr=%s",
+            trigger_id, repo.full_name, pr_number,
+        )
+        background_tasks.add_task(
+            _run_manual,
+            repo=repo, pr_number=pr_number, trigger_id=trigger_id,
+        )
+        return Response(
+            content=json.dumps({
+                "status": "processing",
+                "trigger_id": trigger_id,
+                "repo": repo.full_name,
+                "pr": pr_number,
+            }),
+            media_type="application/json",
+            status_code=202,
+        )
+
+    def _run_manual(*, repo, pr_number: int, trigger_id: str) -> None:
+        try:
+            process_pr_manual(
+                repo, pr_number,
+                settings,
+                trigger_id=trigger_id,
+                provider=provider,
+                signing_key_path=signing_key_path,
+                slack=slack,
+            )
+            logger.info("manual trigger processed trigger=%s", trigger_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("manual_trigger_failed trigger=%s", trigger_id)
 
     return app
 
