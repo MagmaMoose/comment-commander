@@ -7,3 +7,4 @@ resources:
   - externalsecret.yaml
   - onepassworditem.yaml
   - ghcr-pull-secret.yaml
+  - ingress.yaml

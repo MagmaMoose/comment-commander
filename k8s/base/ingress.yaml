@@ -1,0 +1,25 @@
+# DNS-only Ingress.
+#
+# This Ingress doesn't actually route traffic — the firefly cloudflared
+# tunnel terminates `comment-commander.magmamoose.com` at the in-cluster
+# Service directly (ingress rule lives in
+# terraform/cloudflare/zero-trust/prod/tunnels.tf in the infra repo).
+#
+# Its sole purpose is to give external-dns-cloudflare something to
+# read so it publishes the proxied CNAME against the magmamoose.com
+# zone without anyone having to hand-write a Terraform record. The
+# `target` annotation points at the tunnel UUID, the `cloudflare-
+# proxied` annotation forces it through the orange-cloud (otherwise
+# Cloudflare returns the cfargotunnel.com hostname directly to the
+# caller and the tunnel can't terminate).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: comment-commander
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: "comment-commander.magmamoose.com"
+    external-dns.alpha.kubernetes.io/target: "7694eb38-c35e-4905-bd2b-16ab7053080a.cfargotunnel.com"
+    external-dns.alpha.kubernetes.io/cloudflare-proxied: "true"
+spec:
+  rules:
+    - host: comment-commander.magmamoose.com
