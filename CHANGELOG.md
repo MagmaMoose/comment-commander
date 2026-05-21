@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.1.3 (2026-05-21)
+
+### Bug Fixes
+
+- **observability**: Log stderr/stdout when git subprocesses fail
+  ([`e1ac9b8`](https://github.com/MagmaMoose/comment-commander/commit/e1ac9b8c94cdfabf1cfc5f40d41a566dac24da46))
+
+### Chores
+
+- Bump image tag to v1.1.2
+  ([`8016423`](https://github.com/MagmaMoose/comment-commander/commit/8016423d8130f29119fa79cc3492ca1a30164d07))
+
+
 ## v1.1.2 (2026-05-21)
 
 ### Bug Fixes
