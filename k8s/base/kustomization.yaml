@@ -6,3 +6,4 @@ resources:
   - pvc.yaml
   - externalsecret.yaml
   - onepassworditem.yaml
+  - ghcr-pull-secret.yaml
