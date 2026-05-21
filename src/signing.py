@@ -41,7 +41,10 @@ def install_ssh_signing_key(private_key: str, *, home: str | None = None) -> Pat
 
     # Sanity-check: ssh-keygen -y reads a private key (no agent involvement)
     # and prints the public half. Failing now is much better than failing
-    # halfway through a commit.
+    # halfway through a commit. Persist that public half to <path>.pub —
+    # `git commit -S` with gpg.format=ssh requires it sitting next to the
+    # private key, otherwise ssh-keygen returns:
+    #   "Couldn't load public key <signingkey>: No such file or directory"
     result = subprocess.run(
         ["ssh-keygen", "-y", "-f", str(key_path)],
         capture_output=True,
@@ -51,7 +54,11 @@ def install_ssh_signing_key(private_key: str, *, home: str | None = None) -> Pat
         raise SigningError(
             f"ssh-keygen could not read the signing key: {result.stderr.strip()}"
         )
-    logger.info("SSH signing key installed at %s", key_path)
+    pub_path = key_path.parent / (key_path.name + ".pub")
+    pub_path.write_text(result.stdout if result.stdout.endswith("\n") else result.stdout + "\n",
+                        encoding="utf-8")
+    pub_path.chmod(0o644)
+    logger.info("SSH signing key installed at %s (public half at %s)", key_path, pub_path)
     return key_path
 
 
