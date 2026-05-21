@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.1.4 (2026-05-21)
+
+### Bug Fixes
+
+- **signing**: Write public-key file so ssh-keygen can sign commits
+  ([`9b11061`](https://github.com/MagmaMoose/comment-commander/commit/9b110610d0f7a66abbc4f16c866e690885b2e986))
+
+### Chores
+
+- Bump image tag to v1.1.3
+  ([`27f220b`](https://github.com/MagmaMoose/comment-commander/commit/27f220b98fe292ec15218e1533000f9db0ab4214))
+
+
 ## v1.1.3 (2026-05-21)
 
 ### Bug Fixes
