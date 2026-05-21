@@ -29,5 +29,12 @@ jobs:
       - uses: calebsargeant/semantic-release@v1
         with:
           mode: release
+          # Single-environment service: only `prod` exists, so there are no
+          # prerelease channels. `environments` flips the action's default
+          # ["dev","staging","prod"] to just ["prod"], which makes prod the
+          # terminal (stable-semver) environment by definition.
+          deployment-model: tbd
+          environment: prod
+          environments: '["prod"]'
           image_name: comment-commander
           force-bump: ${{ inputs.bump || '' }}
