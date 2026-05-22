@@ -276,7 +276,7 @@ def create_app(
         result: TriggerResult,
     ) -> None:
         try:
-            process_pr_manual(
+            success = process_pr_manual(
                 instance, repo, pr_number,
                 settings,
                 trigger_id=trigger_id,
@@ -285,8 +285,11 @@ def create_app(
                 slack=slack,
                 result=result,
             )
-            result.finish("ok")
-            logger.info("manual trigger processed trigger=%s", trigger_id)
+            if success:
+                result.finish("ok")
+            else:
+                result.finish("error", error="process_pr_manual returned False")
+            logger.info("manual trigger processed trigger=%s success=%s", trigger_id, success)
         except Exception as exc:  # noqa: BLE001
             result.finish("error", error=type(exc).__name__)
             logger.exception("manual_trigger_failed trigger=%s", trigger_id)
