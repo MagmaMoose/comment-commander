@@ -6,6 +6,7 @@ import logging
 import re
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,13 @@ BOT_MARKER = "<!-- comment-commander -->"
 _PR_URL_RE = re.compile(
     r"^(?:https?://[^/]+/)?(?P<owner>[^/]+)/(?P<repo>[^/#]+)(?:/pull/|#)(?P<num>\d+)"
 )
+
+# Serializes the clone -> commit -> push -> resolve critical section. GitHub
+# fans one review out into several webhook deliveries (a pull_request_review
+# event plus one pull_request_review_comment per comment); processing them
+# concurrently raced on `git push` to the same branch, and the losing
+# deliveries silently dropped their commit, reply and thread-resolve.
+_PROCESS_LOCK = threading.Lock()
 
 
 class ProcessorError(RuntimeError):
@@ -365,7 +373,19 @@ def _collect_comments(
     return out[: settings.max_comments_per_event]
 
 
-def _process_pr(
+def _process_pr(**kwargs: Any) -> None:
+    """Serialized entrypoint for PR processing — see _PROCESS_LOCK.
+
+    GitHub fans one review out into several webhook deliveries; without
+    serialization their _process_pr_locked runs raced on `git push` to the
+    same branch and the losing deliveries dropped their commit, reply and
+    thread-resolve. A queued delivery re-reads thread state on entry, so
+    anything already handled is filtered out and it simply no-ops."""
+    with _PROCESS_LOCK:
+        _process_pr_locked(**kwargs)
+
+
+def _process_pr_locked(
     *,
     instance: GitHubInstance,
     base_repo: RepositoryRef,

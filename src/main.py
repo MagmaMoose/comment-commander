@@ -276,7 +276,13 @@ def create_app(
         result: TriggerResult,
     ) -> None:
         try:
-            success = process_pr_manual(
+            # process_pr_manual returns None — success vs failure is signalled
+            # by whether it raises. A hard error propagates and is caught
+            # below ("error"); a clean return means the run completed ("ok").
+            # (Do not re-add a `success = process_pr_manual(...)` check — the
+            # function has no bool return, so it always read falsy and marked
+            # every run "error".)
+            process_pr_manual(
                 instance, repo, pr_number,
                 settings,
                 trigger_id=trigger_id,
@@ -285,11 +291,8 @@ def create_app(
                 slack=slack,
                 result=result,
             )
-            if success:
-                result.finish("ok")
-            else:
-                result.finish("error", error="process_pr_manual returned False")
-            logger.info("manual trigger processed trigger=%s success=%s", trigger_id, success)
+            result.finish("ok")
+            logger.info("manual trigger processed trigger=%s", trigger_id)
         except Exception as exc:  # noqa: BLE001
             result.finish("error", error=type(exc).__name__)
             logger.exception("manual_trigger_failed trigger=%s", trigger_id)
