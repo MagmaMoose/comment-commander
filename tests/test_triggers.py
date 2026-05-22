@@ -16,6 +16,38 @@ def test_create_and_get():
     assert store.get("missing") is None
 
 
+def test_create_defaults_source_to_manual():
+    result = _store().create(trigger_id="t", repo="o/r", pr_number=1, instance="gh")
+    assert result.source == "manual"
+    assert result.as_dict()["source"] == "manual"
+
+
+def test_create_records_webhook_source():
+    result = _store().create(
+        trigger_id="t", repo="o/r", pr_number=1, instance="gh", source="webhook"
+    )
+    assert result.source == "webhook"
+    assert result.as_dict()["source"] == "webhook"
+
+
+def test_recent_returns_newest_first():
+    store = _store(max_size=10)
+    for i in range(4):
+        store.create(trigger_id=f"t{i}", repo="o/r", pr_number=i, instance="gh")
+        # Force a strictly increasing started_at so ordering is deterministic.
+        store.get(f"t{i}").started_at = float(i)
+    ordered = [r.trigger_id for r in store.recent()]
+    assert ordered == ["t3", "t2", "t1", "t0"]
+
+
+def test_recent_honours_limit():
+    store = _store(max_size=10)
+    for i in range(5):
+        store.create(trigger_id=f"t{i}", repo="o/r", pr_number=i, instance="gh")
+    assert len(store.recent(limit=2)) == 2
+    assert store.recent(limit=0) == []
+
+
 def test_record_decision_counts():
     result = _store().create(trigger_id="t", repo="o/r", pr_number=1, instance="gh")
     for decision in ("fix", "fix", "dismiss", "skip", None):

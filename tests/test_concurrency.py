@@ -20,10 +20,11 @@ def test_process_pr_serializes_concurrent_runs(monkeypatch):
     inside = 0
     peak = 0
     bookkeeping = threading.Lock()
-    barrier = threading.Barrier(5)
 
     def fake_locked(**kwargs):
-        barrier.wait()  # all threads reach here before any proceeds
+        # No barrier here: _PROCESS_LOCK admits one thread at a time, so all
+        # five could never reach a Barrier(5) together — it would deadlock.
+        # The sleep below gives ample overlap window if the lock were absent.
         nonlocal inside, peak
         with bookkeeping:
             inside += 1

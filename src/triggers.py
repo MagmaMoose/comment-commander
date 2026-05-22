@@ -37,6 +37,10 @@ class TriggerResult:
     repo: str
     pr_number: int
     instance: str
+    # How the run was triggered: "manual" (a /process call) or "webhook"
+    # (a GitHub webhook delivery). comment-commander-pro splits its run
+    # history by this.
+    source: str = "manual"
     status: str = PROCESSING
     started_at: float = field(default_factory=time.time)
     finished_at: float | None = None
@@ -81,6 +85,7 @@ class TriggerResult:
         with self._lock:
             return {
                 "trigger_id": self.trigger_id,
+                "source": self.source,
                 "repo": self.repo,
                 "pr": self.pr_number,
                 "instance": self.instance,
@@ -112,13 +117,20 @@ class TriggerStore:
         self._items: "OrderedDict[str, TriggerResult]" = OrderedDict()
 
     def create(
-        self, *, trigger_id: str, repo: str, pr_number: int, instance: str
+        self,
+        *,
+        trigger_id: str,
+        repo: str,
+        pr_number: int,
+        instance: str,
+        source: str = "manual",
     ) -> TriggerResult:
         result = TriggerResult(
             trigger_id=trigger_id,
             repo=repo,
             pr_number=pr_number,
             instance=instance,
+            source=source,
         )
         with self._lock:
             self._items[trigger_id] = result
@@ -130,3 +142,15 @@ class TriggerStore:
     def get(self, trigger_id: str) -> TriggerResult | None:
         with self._lock:
             return self._items.get(trigger_id)
+
+    def recent(self, limit: int = 100) -> list[TriggerResult]:
+        """Return up to `limit` stored results, newest-first by `started_at`.
+
+        Powers `GET /runs` for the comment-commander-pro dashboard. The
+        snapshot is taken under the lock; each `TriggerResult` then
+        serializes itself (under its own lock) when `as_dict()` is called.
+        """
+        with self._lock:
+            items = list(self._items.values())
+        items.sort(key=lambda r: r.started_at, reverse=True)
+        return items[: max(limit, 0)]
