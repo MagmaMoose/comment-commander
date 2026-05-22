@@ -526,8 +526,6 @@ def _process_pr(
             logger.info("pushed branch=%s repo=%s", head_branch, head_repo.full_name)
 
         for pending_reply in replies:
-            if result is not None:
-                result.record_decision(pending_reply.decision)
             replied = False
             resolved = False
             try:
@@ -547,6 +545,8 @@ def _process_pr(
                     pending_reply.comment.id, exc,
                 )
                 continue
+            if result is not None:
+                result.record_decision(pending_reply.decision)
             logger.info(
                 "thread handled comment_id=%s replied=%s resolved=%s",
                 pending_reply.comment.id, replied, resolved,
