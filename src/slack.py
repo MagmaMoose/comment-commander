@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 import httpx
 
@@ -50,9 +50,14 @@ class SlackNotifier:
         commit_subject: str | None = None,
         reply: str = "",
         host: str = "github.com",
-    ) -> None:
+    ) -> dict[str, Any] | None:
+        """Post the decision to Slack.
+
+        Returns the message ref ({"ts", "channel"}) on success, or None when
+        disabled or the post failed. Callers use the ref only to record the
+        message id — never to gate the bot's main path."""
         if not self.enabled:
-            return
+            return None
         text = self._format_message(
             decision=decision,
             repo=repo,
@@ -65,7 +70,7 @@ class SlackNotifier:
             reply=reply,
             host=host,
         )
-        self._post(text)
+        return self._post(text)
 
     # --- internals -----------------------------------------------------------
 
@@ -103,7 +108,8 @@ class SlackNotifier:
             lines.append(f"> {snippet}")
         return "\n".join(lines)
 
-    def _post(self, text: str) -> None:
+    def _post(self, text: str) -> dict[str, Any] | None:
+        """Post `text`; return {"ts", "channel"} on success, else None."""
         try:
             response = httpx.post(
                 SLACK_API,
@@ -119,17 +125,21 @@ class SlackNotifier:
             )
         except httpx.HTTPError as exc:
             logger.warning("slack post failed (transport): %s", exc)
-            return
+            return None
         if response.status_code != 200:
             logger.warning(
                 "slack post failed status=%s body=%s",
                 response.status_code, response.text[:200],
             )
-            return
+            return None
         try:
             body = response.json()
         except ValueError:
             logger.warning("slack returned non-JSON: %s", response.text[:200])
-            return
+            return None
         if not body.get("ok"):
             logger.warning("slack returned ok=false error=%s", body.get("error"))
+            return None
+        # chat.postMessage echoes the channel id + message ts (the "Slack
+        # message id"). comment-commander-pro records these per trigger.
+        return {"ts": body.get("ts"), "channel": body.get("channel")}

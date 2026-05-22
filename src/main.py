@@ -26,6 +26,7 @@ from llm import build_provider
 from processor import extract_jobs, parse_pr_url, process_jobs, process_pr_manual
 from signing import install_ssh_signing_key
 from slack import SlackNotifier
+from triggers import TriggerResult, TriggerStore
 
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -101,6 +102,11 @@ def create_app(
     app.state.signing_key_path = signing_key_path
     app.state.provider = provider
     app.state.deliveries = deliveries
+
+    # Per-trigger results for manual /process runs — lets comment-commander-pro
+    # poll GET /process/{trigger_id} for the final status + Slack message ids.
+    trigger_store = TriggerStore()
+    app.state.triggers = trigger_store
 
     @app.middleware("http")
     async def access_log(request: Request, call_next):
@@ -242,9 +248,16 @@ def create_app(
             "manual /process accepted trigger=%s instance=%s repo=%s pr=%s",
             trigger_id, instance.name, repo.full_name, pr_number,
         )
+        result = trigger_store.create(
+            trigger_id=trigger_id,
+            repo=repo.full_name,
+            pr_number=pr_number,
+            instance=instance.name,
+        )
         background_tasks.add_task(
             _run_manual,
-            instance=instance, repo=repo, pr_number=pr_number, trigger_id=trigger_id,
+            instance=instance, repo=repo, pr_number=pr_number,
+            trigger_id=trigger_id, result=result,
         )
         return Response(
             content=json.dumps({
@@ -258,19 +271,51 @@ def create_app(
             status_code=202,
         )
 
-    def _run_manual(*, instance: GitHubInstance, repo, pr_number: int, trigger_id: str) -> None:
+    def _run_manual(
+        *, instance: GitHubInstance, repo, pr_number: int, trigger_id: str,
+        result: TriggerResult,
+    ) -> None:
         try:
-            process_pr_manual(
+            success = process_pr_manual(
                 instance, repo, pr_number,
                 settings,
                 trigger_id=trigger_id,
                 provider=provider,
                 signing_key_path=signing_key_path,
                 slack=slack,
+                result=result,
             )
-            logger.info("manual trigger processed trigger=%s", trigger_id)
-        except Exception:  # noqa: BLE001
+            if success:
+                result.finish("ok")
+            else:
+                result.finish("error", error="process_pr_manual returned False")
+            logger.info("manual trigger processed trigger=%s success=%s", trigger_id, success)
+        except Exception as exc:  # noqa: BLE001
+            result.finish("error", error=type(exc).__name__)
             logger.exception("manual_trigger_failed trigger=%s", trigger_id)
+
+    @app.get("/process/{trigger_id}")
+    def process_status(
+        trigger_id: str,
+        x_trigger_token: str | None = Header(default=None),
+    ) -> Response:
+        """Outcome of a manual /process run: status, decision counts and the
+        Slack message ids it posted. Polled by comment-commander-pro.
+
+        Auth: same X-Trigger-Token as /process. Returns 404 once a trigger
+        has aged out of the in-memory store (or never existed)."""
+        if not x_trigger_token or not hmac.compare_digest(
+            x_trigger_token, settings.github_webhook_secret
+        ):
+            raise HTTPException(status_code=403, detail="invalid_token")
+        result = trigger_store.get(trigger_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="unknown_trigger")
+        return Response(
+            content=json.dumps(result.as_dict()),
+            media_type="application/json",
+            status_code=200,
+        )
 
     @app.post("/setup-webhook")
     async def setup_webhook(
