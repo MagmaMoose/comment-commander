@@ -27,6 +27,13 @@ def test_disabled_notifier_skips_post(monkeypatch):
     assert calls == []
 
 
+def _fake_permalink(*a, **kw):
+    """Stub for httpx.get — keeps chat.getPermalink off the network."""
+    return httpx.Response(
+        200, json={"ok": True, "permalink": "https://acme.slack.com/archives/C1/p1"}
+    )
+
+
 def test_enabled_notifier_posts_to_slack(monkeypatch):
     captured: dict = {}
 
@@ -34,9 +41,10 @@ def test_enabled_notifier_posts_to_slack(monkeypatch):
         captured["url"] = url
         captured["json"] = json
         captured["headers"] = headers
-        return httpx.Response(200, json={"ok": True})
+        return httpx.Response(200, json={"ok": True, "channel": "C123", "ts": "1.2"})
 
     monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(httpx, "get", _fake_permalink)
     SlackNotifier(token="xoxb-x", channel="C123").notify_decision(
         decision="fix",
         repo="CalebSargeant/infra", pr_number=242, comment_id=3282274306,
@@ -72,6 +80,7 @@ def test_dismiss_uses_dismiss_prefix(monkeypatch):
         lambda *a, json, **kw: (captured.setdefault("json", json),
                                 httpx.Response(200, json={"ok": True}))[1],
     )
+    monkeypatch.setattr(httpx, "get", _fake_permalink)
     SlackNotifier(token="t", channel="c").notify_decision(
         decision="dismiss", repo="o/r", pr_number=1, comment_id=2,
         comment_path="x.py", comment_line=None,
@@ -111,6 +120,7 @@ def test_long_reply_is_truncated(monkeypatch):
         lambda *a, json, **kw: (captured.setdefault("json", json),
                                 httpx.Response(200, json={"ok": True}))[1],
     )
+    monkeypatch.setattr(httpx, "get", _fake_permalink)
     long_reply = "x" * 1000
     SlackNotifier(token="t", channel="c").notify_decision(
         decision="dismiss", repo="o/r", pr_number=1, comment_id=2,
@@ -122,3 +132,76 @@ def test_long_reply_is_truncated(monkeypatch):
     # limit — we cap the reply snippet to ~240 chars.
     snippet_line = [line for line in text.split("\n") if line.startswith("> ")][0]
     assert len(snippet_line) < 260
+
+
+# --- chat.getPermalink -----------------------------------------------------
+
+
+def _ok_post(*a, json=None, **kw):
+    return httpx.Response(200, json={"ok": True, "channel": "C1", "ts": "1.2"})
+
+
+def test_post_includes_permalink_on_success(monkeypatch):
+    captured: dict = {}
+
+    def fake_get(url, *, params, headers, timeout):
+        captured["url"] = url
+        captured["params"] = params
+        captured["headers"] = headers
+        return httpx.Response(
+            200, json={"ok": True, "permalink": "https://acme.slack.com/archives/C1/p1"}
+        )
+
+    monkeypatch.setattr(httpx, "post", _ok_post)
+    monkeypatch.setattr(httpx, "get", fake_get)
+    ref = SlackNotifier(token="xoxb-x", channel="C1").notify_decision(
+        decision="fix", repo="o/r", pr_number=1, comment_id=2,
+        comment_path="x.py", comment_line=1,
+    )
+    assert ref == {
+        "ts": "1.2",
+        "channel": "C1",
+        "permalink": "https://acme.slack.com/archives/C1/p1",
+    }
+    # getPermalink hit the right endpoint with the posted channel + ts.
+    assert captured["url"] == "https://slack.com/api/chat.getPermalink"
+    assert captured["params"] == {"channel": "C1", "message_ts": "1.2"}
+    assert captured["headers"]["Authorization"] == "Bearer xoxb-x"
+
+
+def test_permalink_none_when_getpermalink_transport_error(monkeypatch):
+    def boom(*a, **kw):
+        raise httpx.ConnectError("network down")
+
+    monkeypatch.setattr(httpx, "post", _ok_post)
+    monkeypatch.setattr(httpx, "get", boom)
+    ref = SlackNotifier(token="t", channel="C1").notify_decision(
+        decision="fix", repo="o/r", pr_number=1, comment_id=2,
+        comment_path="x.py", comment_line=1,
+    )
+    # Post still succeeded — permalink degrades to None, no raise.
+    assert ref["ts"] == "1.2"
+    assert ref["permalink"] is None
+
+
+def test_permalink_none_when_getpermalink_ok_false(monkeypatch):
+    monkeypatch.setattr(httpx, "post", _ok_post)
+    monkeypatch.setattr(
+        httpx, "get",
+        lambda *a, **kw: httpx.Response(200, json={"ok": False, "error": "message_not_found"}),
+    )
+    ref = SlackNotifier(token="t", channel="C1").notify_decision(
+        decision="fix", repo="o/r", pr_number=1, comment_id=2,
+        comment_path="x.py", comment_line=1,
+    )
+    assert ref["permalink"] is None
+
+
+def test_permalink_none_when_getpermalink_non_200(monkeypatch):
+    monkeypatch.setattr(httpx, "post", _ok_post)
+    monkeypatch.setattr(httpx, "get", lambda *a, **kw: httpx.Response(500, text="boom"))
+    ref = SlackNotifier(token="t", channel="C1").notify_decision(
+        decision="fix", repo="o/r", pr_number=1, comment_id=2,
+        comment_path="x.py", comment_line=1,
+    )
+    assert ref["permalink"] is None

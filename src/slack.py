@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 SLACK_API = "https://slack.com/api/chat.postMessage"
+SLACK_PERMALINK_API = "https://slack.com/api/chat.getPermalink"
 
 Decision = Literal["fix", "dismiss", "skip"]
 
@@ -53,9 +54,10 @@ class SlackNotifier:
     ) -> dict[str, Any] | None:
         """Post the decision to Slack.
 
-        Returns the message ref ({"ts", "channel"}) on success, or None when
-        disabled or the post failed. Callers use the ref only to record the
-        message id — never to gate the bot's main path."""
+        Returns the message ref ({"ts", "channel", "permalink"}) on success,
+        or None when disabled or the post failed. `permalink` is best-effort
+        and may be None even on a successful post. Callers use the ref only to
+        record the message id — never to gate the bot's main path."""
         if not self.enabled:
             return None
         text = self._format_message(
@@ -109,7 +111,7 @@ class SlackNotifier:
         return "\n".join(lines)
 
     def _post(self, text: str) -> dict[str, Any] | None:
-        """Post `text`; return {"ts", "channel"} on success, else None."""
+        """Post `text`; return {"ts", "channel", "permalink"} on success, else None."""
         try:
             response = httpx.post(
                 SLACK_API,
@@ -142,4 +144,45 @@ class SlackNotifier:
             return None
         # chat.postMessage echoes the channel id + message ts (the "Slack
         # message id"). comment-commander-pro records these per trigger.
-        return {"ts": body.get("ts"), "channel": body.get("channel")}
+        channel = body.get("channel")
+        ts = body.get("ts")
+        return {
+            "ts": ts,
+            "channel": channel,
+            "permalink": self._permalink(channel, ts),
+        }
+
+    def _permalink(self, channel: Any, ts: Any) -> str | None:
+        """Best-effort chat.getPermalink lookup; None on any failure.
+
+        A permalink is a nice-to-have for comment-commander-pro — it must
+        never break the post, so every failure mode (transport error,
+        non-200, non-JSON, `ok: false`) falls back to None."""
+        if not channel or not ts:
+            return None
+        try:
+            response = httpx.get(
+                SLACK_PERMALINK_API,
+                params={"channel": channel, "message_ts": ts},
+                headers={"Authorization": f"Bearer {self.token}"},
+                timeout=self.timeout,
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("slack getPermalink failed (transport): %s", exc)
+            return None
+        if response.status_code != 200:
+            logger.warning(
+                "slack getPermalink failed status=%s", response.status_code,
+            )
+            return None
+        try:
+            body = response.json()
+        except ValueError:
+            logger.warning("slack getPermalink returned non-JSON")
+            return None
+        if not body.get("ok"):
+            logger.warning(
+                "slack getPermalink returned ok=false error=%s", body.get("error"),
+            )
+            return None
+        return body.get("permalink")

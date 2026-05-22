@@ -276,7 +276,10 @@ def process_pr_manual(
         if not actionable:
             return
 
-        actionable = actionable[: settings.max_comments_per_event]
+        # No max_comments cap here: _process_pr applies it AFTER the
+        # resolved-thread filter. Capping the raw `actionable` list first
+        # meant a re-walk of a PR whose oldest N comments are all resolved
+        # could never reach an unresolved comment sitting past position N.
         _process_pr(
             instance=instance,
             base_repo=repo,
@@ -302,6 +305,7 @@ def process_jobs(
     provider: LLMProvider,
     signing_key_path: str | Path,
     slack: SlackNotifier | None = None,
+    result: TriggerResult | None = None,
 ) -> None:
     if not jobs:
         return
@@ -344,6 +348,7 @@ def process_jobs(
             signing_key_path=signing_key_path,
             delivery=delivery,
             slack=slack or SlackNotifier(token=None, channel=None),
+            result=result,
         )
 
 
@@ -415,6 +420,12 @@ def _process_pr_locked(
             )
             continue
         pending.append((comment, thread))
+
+    # Cap the *work*, not the comments considered. Applying max_comments
+    # before the resolved-thread filter (which the manual flow used to do)
+    # meant a re-walk of a PR whose first N comments are all resolved would
+    # never reach an unresolved one past position N — it just no-op'd.
+    pending = pending[: settings.max_comments_per_event]
 
     if not pending:
         logger.info(

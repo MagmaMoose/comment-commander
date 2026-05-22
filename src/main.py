@@ -189,6 +189,22 @@ def create_app(
         )
 
     def _run_jobs(*, jobs: Any, delivery: str) -> None:
+        if not jobs:
+            # extract_jobs only dispatches a background task for a non-empty
+            # list, but guard anyway — a tracked run needs a job to read
+            # repo/pr/instance from.
+            logger.warning("background task started with no jobs delivery=%s", delivery)
+            return
+        first = jobs[0]
+        # Track webhook-delivered runs the same way /process tracks manual
+        # ones, so comment-commander-pro can surface them via GET /runs.
+        result = trigger_store.create(
+            trigger_id=delivery,
+            repo=first.base_repo.full_name,
+            pr_number=first.pr_number,
+            instance=first.instance.name,
+            source="webhook",
+        )
         try:
             process_jobs(
                 jobs,
@@ -197,9 +213,12 @@ def create_app(
                 provider=provider,
                 signing_key_path=signing_key_path,
                 slack=slack,
+                result=result,
             )
+            result.finish("ok")
             logger.info("delivery processed delivery=%s", delivery)
-        except Exception:  # noqa: BLE001 - background task must not crash the server
+        except Exception as exc:  # noqa: BLE001 - background task must not crash the server
+            result.finish("error", error=type(exc).__name__)
             logger.exception("background_task_failed delivery=%s", delivery)
 
     @app.post("/process")
@@ -316,6 +335,27 @@ def create_app(
             raise HTTPException(status_code=404, detail="unknown_trigger")
         return Response(
             content=json.dumps(result.as_dict()),
+            media_type="application/json",
+            status_code=200,
+        )
+
+    @app.get("/runs")
+    def runs(
+        x_trigger_token: str | None = Header(default=None),
+    ) -> Response:
+        """Recent runs (manual /process + webhook deliveries), newest-first.
+
+        Polled by the comment-commander-pro dashboard for run history.
+        Auth: same X-Trigger-Token as /process. In-memory and bounded —
+        runs are lost on restart and age out once the store fills."""
+        if not x_trigger_token or not hmac.compare_digest(
+            x_trigger_token, settings.github_webhook_secret
+        ):
+            raise HTTPException(status_code=403, detail="invalid_token")
+        return Response(
+            content=json.dumps(
+                {"runs": [r.as_dict() for r in trigger_store.recent(100)]}
+            ),
             media_type="application/json",
             status_code=200,
         )
