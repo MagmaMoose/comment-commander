@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.6.1 (2026-05-22)
+
+### Bug Fixes
+
+- **processor**: Serialize PR processing to stop concurrent push races
+  ([`43bdefe`](https://github.com/MagmaMoose/comment-commander/commit/43bdefe58fae0a9785dd4c3329787c51a5eca34c))
+
+### Testing
+
+- Synchronize concurrency test with Barrier for deterministic failure
+  ([`e3eb88e`](https://github.com/MagmaMoose/comment-commander/commit/e3eb88ec90fe5d17b47bb597ca844e97b8464dc6))
+
+
 ## v1.6.0 (2026-05-22)
 
 ### Bug Fixes
