@@ -2,6 +2,27 @@
 
 <!-- version list -->
 
+## v1.6.0 (2026-05-22)
+
+### Bug Fixes
+
+- Report error status when process_pr_manual fails early
+  ([`d7cfbc2`](https://github.com/MagmaMoose/comment-commander/commit/d7cfbc228ed7ec0e430cca70d375e7ac46994001))
+
+- **processor**: Record decision only after successful reply/resolve
+  ([`f6a8793`](https://github.com/MagmaMoose/comment-commander/commit/f6a87932b729fbdaf1ea43932a871823fcd2407e))
+
+### Chores
+
+- Bump image tag to v1.5.1
+  ([`28c4369`](https://github.com/MagmaMoose/comment-commander/commit/28c43690e219c6457fd9748933cfde249b9a02c4))
+
+### Features
+
+- **process**: Accept GHE PR URLs + expose trigger results for polling
+  ([`602930a`](https://github.com/MagmaMoose/comment-commander/commit/602930aef7dfd25df125ee839daa34898941b8ee))
+
+
 ## v1.5.1 (2026-05-21)
 
 ### Bug Fixes
