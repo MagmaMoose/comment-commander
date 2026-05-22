@@ -2,6 +2,24 @@
 
 <!-- version list -->
 
+## v1.7.0 (2026-05-22)
+
+### Chores
+
+- Update comment-commander image
+  ([`e97e9da`](https://github.com/MagmaMoose/comment-commander/commit/e97e9daa214b00e1f881d96ec1fdbd86b47034e7))
+
+### Features
+
+- **process**: Track webhook runs + Slack permalinks; fix manual-rerun comment cap
+  ([`3d97038`](https://github.com/MagmaMoose/comment-commander/commit/3d970380878df401ee903589e636163463c5f7d7))
+
+### Performance Improvements
+
+- **processor**: Short-circuit pending loop to cap thread lookups
+  ([`3618b37`](https://github.com/MagmaMoose/comment-commander/commit/3618b37b5496fe5d468b4eff799ea7a672602306))
+
+
 ## v1.6.1 (2026-05-22)
 
 ### Bug Fixes
