@@ -31,6 +31,7 @@ from llm import (
 )
 from signing import configure_repo_signing
 from slack import SlackNotifier
+from triggers import TriggerResult
 
 logger = logging.getLogger(__name__)
 
@@ -41,13 +42,16 @@ logger = logging.getLogger(__name__)
 # own, since both use the same identity).
 BOT_MARKER = "<!-- comment-commander -->"
 
-# Accepts:
+# Accepts any host — github.com and GitHub Enterprise (e.g. *.ghe.com) alike:
 #   https://github.com/owner/repo/pull/123
 #   https://github.com/owner/repo/pull/123/files
 #   https://github.com/owner/repo/pull/123#discussion_r456
-# Plus the lighter `owner/repo#123` shorthand.
+#   https://pinkroccade.ghe.com/owner/repo/pull/123
+# Plus the lighter `owner/repo#123` shorthand. The host is matched but not
+# captured here — main.py's _host_from_pr_url extracts it for instance
+# routing, and find_instance_for_host rejects hosts we aren't configured for.
 _PR_URL_RE = re.compile(
-    r"^(?:https?://github\.com/)?(?P<owner>[^/]+)/(?P<repo>[^/#]+)(?:/pull/|#)(?P<num>\d+)"
+    r"^(?:https?://[^/]+/)?(?P<owner>[^/]+)/(?P<repo>[^/#]+)(?:/pull/|#)(?P<num>\d+)"
 )
 
 
@@ -208,6 +212,7 @@ def process_pr_manual(
     provider: LLMProvider,
     signing_key_path: str | Path,
     slack: SlackNotifier | None = None,
+    result: TriggerResult | None = None,
 ) -> None:
     """Manual triggered processing — re-walks every unresolved review thread.
 
@@ -277,6 +282,7 @@ def process_pr_manual(
             signing_key_path=signing_key_path,
             delivery=f"manual:{trigger_id}",
             slack=slack or SlackNotifier(token=None, channel=None),
+            result=result,
         )
 
 
@@ -373,6 +379,7 @@ def _process_pr(
     signing_key_path: str | Path,
     delivery: str,
     slack: SlackNotifier,
+    result: TriggerResult | None = None,
 ) -> None:
     pending: list[tuple[ReviewComment, ReviewThread | None]] = []
     for comment in comments:
@@ -519,6 +526,8 @@ def _process_pr(
             logger.info("pushed branch=%s repo=%s", head_branch, head_repo.full_name)
 
         for pending_reply in replies:
+            if result is not None:
+                result.record_decision(pending_reply.decision)
             replied = False
             resolved = False
             try:
@@ -543,7 +552,7 @@ def _process_pr(
                 pending_reply.comment.id, replied, resolved,
             )
             if pending_reply.decision is not None:
-                slack.notify_decision(
+                slack_ref = slack.notify_decision(
                     decision=pending_reply.decision,
                     repo=base_repo.full_name,
                     pr_number=pr_number,
@@ -555,6 +564,8 @@ def _process_pr(
                     reply=pending_reply.reply_text or "",
                     host=instance.host,
                 )
+                if result is not None:
+                    result.add_slack_message(slack_ref)
 
 
 def _context_for(

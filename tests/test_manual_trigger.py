@@ -21,6 +21,10 @@ from processor import BOT_MARKER, _format_reply_body, parse_pr_url
     ("https://github.com/foo/bar/pull/77#discussion_r999", "foo", "bar", 77),
     ("CalebSargeant/infra#242", "CalebSargeant", "infra", 242),
     ("magmamoose/comment-commander#3", "magmamoose", "comment-commander", 3),
+    # GitHub Enterprise hosts — and a dotted repo name must survive too.
+    ("https://pinkroccade.ghe.com/samenlevingszaken/PRLG.TestManagement/pull/320",
+     "samenlevingszaken", "PRLG.TestManagement", 320),
+    ("https://github.example.com/o/r/pull/9/files", "o", "r", 9),
 ])
 def test_parse_pr_url_happy_paths(url, owner, repo, num):
     parsed = parse_pr_url(url)
@@ -157,3 +161,45 @@ def test_process_shorthand_url(settings, stub_provider, deliveries, captured_man
     )
     assert response.status_code == 202
     assert captured_manual[0]["repo"] == "CalebSargeant/infra"
+
+
+# --- GET /process/{trigger_id} ---------------------------------------------
+
+
+def test_process_status_requires_token(settings, stub_provider, deliveries):
+    client = _client(settings, stub_provider, deliveries)
+    assert client.get("/process/whatever").status_code == 403
+
+
+def test_process_status_unknown_trigger(settings, stub_provider, deliveries):
+    client = _client(settings, stub_provider, deliveries)
+    response = client.get(
+        "/process/does-not-exist",
+        headers={"X-Trigger-Token": settings.github_webhook_secret},
+    )
+    assert response.status_code == 404
+    assert response.json() == {"detail": "unknown_trigger"}
+
+
+def test_process_status_reports_finished_run(settings, stub_provider, deliveries, captured_manual):
+    """After /process, the background task finishes the trigger — the status
+    endpoint should then report it terminal (the work itself is stubbed)."""
+    client = _client(settings, stub_provider, deliveries)
+    trigger_id = client.post(
+        "/process",
+        json={"pr_url": "https://github.com/CalebSargeant/infra/pull/242"},
+        headers={"X-Trigger-Token": settings.github_webhook_secret},
+    ).json()["trigger_id"]
+
+    response = client.get(
+        f"/process/{trigger_id}",
+        headers={"X-Trigger-Token": settings.github_webhook_secret},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["trigger_id"] == trigger_id
+    assert body["status"] == "ok"
+    assert body["repo"] == "CalebSargeant/infra"
+    assert body["pr"] == 242
+    assert body["finished_at"] is not None
+    assert body["slack_messages"] == []
