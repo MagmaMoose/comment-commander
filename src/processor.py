@@ -420,12 +420,10 @@ def _process_pr_locked(
             )
             continue
         pending.append((comment, thread))
-
-    # Cap the *work*, not the comments considered. Applying max_comments
-    # before the resolved-thread filter (which the manual flow used to do)
-    # meant a re-walk of a PR whose first N comments are all resolved would
-    # never reach an unresolved one past position N — it just no-op'd.
-    pending = pending[: settings.max_comments_per_event]
+        # Short-circuit once we have enough pending items to avoid
+        # unnecessary API calls for thread lookups.
+        if len(pending) >= settings.max_comments_per_event:
+            break
 
     if not pending:
         logger.info(
