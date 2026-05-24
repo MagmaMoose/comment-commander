@@ -832,6 +832,44 @@ def _redact_pat(arg: str) -> str:
     return re.sub(r"://x-access-token:[^@]+@", "://x-access-token:***@", arg)
 
 
+_ERROR_SUMMARY_MAX = 500
+
+
+def summarize_exception(exc: BaseException) -> str:
+    """One-line summary suitable for `TriggerResult.error`.
+
+    Before this existed, `/process` stored only `type(exc).__name__`, which
+    surfaced opaque entries like "CalledProcessError" in the runs UI with no
+    hint at which git step failed. For `CalledProcessError` we now attach
+    the redacted command and the first non-empty line of stderr (or stdout
+    when stderr is silent — git push sometimes uses stdout for its rejection
+    message). For everything else, include the exception's `str()` so
+    GitHubError / LLMError messages survive."""
+    name = type(exc).__name__
+    if isinstance(exc, subprocess.CalledProcessError):
+        cmd_args = exc.cmd if isinstance(exc.cmd, (list, tuple)) else [str(exc.cmd or "")]
+        cmd = " ".join(_redact_pat(str(a)) for a in cmd_args)
+        text = (exc.stderr or exc.stdout or "")
+        if isinstance(text, (bytes, bytearray)):
+            try:
+                text = text.decode("utf-8", "replace")
+            except Exception:  # noqa: BLE001 - belt-and-braces, decode never raises here
+                text = ""
+        detail = next(
+            (line.strip() for line in str(text).splitlines() if line.strip()),
+            "",
+        )
+        summary = f"{name} rc={exc.returncode} cmd={cmd!r}"
+        if detail:
+            summary += f" stderr={detail!r}"
+    else:
+        message = str(exc).strip()
+        summary = f"{name}: {message}" if message else name
+    if len(summary) > _ERROR_SUMMARY_MAX:
+        summary = summary[: _ERROR_SUMMARY_MAX - 1] + "…"
+    return summary
+
+
 _CONVENTIONAL_COMMIT_TYPES = (
     "feat", "fix", "chore", "refactor", "docs", "test",
     "style", "perf", "build", "ci", "revert",
