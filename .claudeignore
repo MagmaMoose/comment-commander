@@ -1,0 +1,30 @@
+.git/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+dist/
+build/
+coverage/
+.terraform/
+vendor/
+node_modules/
+*.log
+
+# Local secrets / decrypted overlays — never read
+.env
+secret.yaml
+k8s/overlays/*/secret.yaml
+
+# IDE noise
+.idea/
+.vscode/
+
+# On-demand only — load explicitly when relevant
+.claude/sessions/
+.claude/decisions/
+
+# Worktree recursion guard
+.claude/worktrees/
