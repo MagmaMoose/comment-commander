@@ -378,6 +378,41 @@ def _collect_comments(
     return out[: settings.max_comments_per_event]
 
 
+def _collect_sweep_comments(
+    gh: GitHubClient,
+    base_repo: RepositoryRef,
+    pr_number: int,
+    already_handled_ids: set[int],
+    settings: Settings,
+) -> list[ReviewComment]:
+    """Catch unresolved bot comments the webhook payload missed.
+
+    Webhook handlers only see the comments their own event delivered. If a
+    Copilot review has >max_comments_per_event items, the surplus is silently
+    dropped by `_collect_comments`. Webhook deliveries can also be lost
+    (e.g. during a tunnel outage). Either way the user has to manually re-run
+    /process to clean up — this sweep eliminates that pattern.
+
+    Returns *candidate* comments only. Caller still runs each through
+    find_review_thread, so already-resolved threads are skipped.
+    """
+    try:
+        all_comments = gh.list_pr_review_comments(base_repo, pr_number)
+    except GitHubError as exc:
+        logger.warning(
+            "sweep list_pr_review_comments failed pr=%s repo=%s err=%s",
+            pr_number, base_repo.full_name, exc,
+        )
+        return []
+    return [
+        c for c in all_comments
+        if c.id not in already_handled_ids
+        and c.in_reply_to_id is None
+        and BOT_MARKER not in c.body
+        and (c.user_login or "").lower() in settings.bot_logins
+    ]
+
+
 def _process_pr(**kwargs: Any) -> None:
     """Serialized entrypoint for PR processing — see _PROCESS_LOCK.
 
@@ -424,6 +459,38 @@ def _process_pr_locked(
         # unnecessary API calls for thread lookups.
         if len(pending) >= settings.max_comments_per_event:
             break
+
+    # Sweep — webhook deliveries only carry the comments from their own
+    # event payload, so any unresolved bot comment that didn't fit in this
+    # delivery (cap drop in _collect_comments, lost webhook, bot login
+    # rename) sits forever until someone re-triggers /process. Pull them
+    # in here so a single trigger is exhaustive.
+    handled_ids = {c.id for c, _ in pending}
+    for comment in _collect_sweep_comments(
+        gh, base_repo, pr_number, handled_ids, settings
+    ):
+        try:
+            thread = gh.find_review_thread(base_repo, pr_number, comment)
+        except GitHubError as exc:
+            logger.warning("sweep find_review_thread failed: %s", exc)
+            thread = None
+        if thread and thread.is_resolved:
+            continue
+        pending.append((comment, thread))
+        logger.info(
+            "sweep picked up comment_id=%s author=%s delivery=%s pr=%s repo=%s",
+            comment.id, comment.user_login, delivery, pr_number,
+            base_repo.full_name,
+        )
+
+    # Cap the *work*, not the comments considered. Applying max_comments
+    # before the resolved-thread filter (which the manual flow used to do)
+    # meant a re-walk of a PR whose first N comments are all resolved would
+    # never reach an unresolved one past position N — it just no-op'd.
+    # Doubled budget so a single trigger can absorb the webhook batch *and*
+    # one sweep's worth of catch-up before deferring the rest to the next
+    # trigger; user explicitly opted into 2× as the blast radius.
+    pending = pending[: settings.max_comments_per_event * 2]
 
     if not pending:
         logger.info(
