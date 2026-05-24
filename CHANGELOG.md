@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.8.0 (2026-05-24)
+
+### Chores
+
+- Update comment-commander image
+  ([`cfe27de`](https://github.com/MagmaMoose/comment-commander/commit/cfe27debe618abec0da7e757fcb0b11a9b30ca16))
+
+### Features
+
+- **processor**: Post-webhook sweep so a single trigger handles every comment
+  ([`813019c`](https://github.com/MagmaMoose/comment-commander/commit/813019c2a3c4cc04f49a9ec35ddd1c96fcfadc13))
+
+
 ## v1.7.0 (2026-05-22)
 
 ### Chores
