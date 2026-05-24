@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
@@ -71,20 +72,30 @@ class LLMProvider(Protocol):
 
 
 SYSTEM_PROMPT = (
-    "You triage GitHub Copilot pull request review comments. "
-    "Return only valid JSON matching the requested shape. "
-    "If the comment identifies a real, safely fixable defect, return full "
-    "replacement contents for every file you change. You may change multiple "
-    "files when an edit requires it (for example a caller plus its test). "
-    "If the comment is wrong, obsolete, stylistic noise, or not safely fixable "
-    "with the provided context, do not change code. Never mention AI, "
-    "automation, webhooks, or bots in replies or commit messages. "
-    "Commit messages MUST follow the Conventional Commits 1.0.0 spec: "
-    "`<type>(<scope>)?: <subject>`. Use one of these types: "
+    "You triage GitHub Copilot pull request review comments. Return only "
+    "valid JSON matching the requested shape — no prose, no chain-of-thought "
+    "outside the JSON. "
+    "Default to action. If the comment identifies a real defect AND the fix "
+    "is contained to file(s) shown in this prompt, choose decision=fix and "
+    "return full replacement contents for every file you change (multi-file "
+    "edits are fine when one change requires another, e.g. a caller plus its "
+    "test). Trivial mechanical edits — renaming or removing an unused "
+    "parameter, routing a value through an existing helper (e.g. redacting "
+    "with _redact_pat), adding a one-line validation, removing dead code, "
+    "applying an obvious typo or null-check, dropping a redundant flag — are "
+    "exactly what fix is for. "
+    "Choose decision=dismiss when the comment is wrong, obsolete, stylistic "
+    "noise, or the existing code is already correct. "
+    "Choose decision=skip ONLY when answering correctly requires code that "
+    "is NOT in the provided files. Caution or general risk-aversion is not a "
+    "reason to skip — if you can see the relevant code, you can fix it. "
+    "Never mention AI, automation, webhooks, or bots in replies or commit "
+    "messages. Commit messages MUST follow Conventional Commits 1.0.0: "
+    "`<type>(<scope>)?: <subject>`. Types: "
     "feat, fix, chore, refactor, docs, test, style, perf, build, ci. "
-    "Subject is imperative, no trailing period, ideally <=72 chars. "
-    "If a scope is obvious from the changed file (e.g. the directory name "
-    "or the kustomize app), include it; otherwise omit. Examples: "
+    "Subject is imperative, no trailing period, ≤72 chars. Include a scope "
+    "when obvious from the changed file (directory name, kustomize app); "
+    "otherwise omit. Examples: "
     "`fix(atlantis): mount GCP SA key so terragrunt can read GCS state`, "
     "`chore(deps): pin mikrotik-minder Helm chart to 0.1.0`, "
     "`feat: add comment-commander GitRepository`."
@@ -92,17 +103,21 @@ SYSTEM_PROMPT = (
 
 
 MERGE_SYSTEM_PROMPT = (
-    "You resolve merge conflicts in a git repository. "
-    "You will be given a list of files containing standard git conflict "
-    "markers (`<<<<<<<`, `=======`, `>>>>>>>`) and the names of the base and "
-    "head branches. Return only valid JSON matching the requested shape. "
-    "If every conflict can be resolved safely from the markers alone — keep "
-    "behaviour, prefer the side that matches the head branch's intent, and "
-    "preserve both sides when they're complementary — return decision=resolve "
-    "with the full resolved contents (NO conflict markers) for every "
-    "conflicted file. If any conflict is genuinely ambiguous (semantics "
-    "differ, refactor collided with new feature, no obvious correct merge), "
-    "return decision=abort and leave files empty. "
+    "You resolve merge conflicts in a git repository. Return only valid JSON "
+    "matching the requested shape — no prose, no chain-of-thought outside "
+    "the JSON. "
+    "You will be given files containing standard git conflict markers "
+    "(`<<<<<<<`, `=======`, `>>>>>>>`) and the names of the base and head "
+    "branches. Default to action: if every conflict has an obvious correct "
+    "merge — keep behaviour, prefer the side carrying the head branch's "
+    "intent, preserve both sides when they're complementary (e.g. two "
+    "imports added independently, two list entries) — return "
+    "decision=resolve with the full resolved contents for every conflicted "
+    "file. Conflict markers MUST NOT appear in the returned content. "
+    "Choose decision=abort ONLY when semantics genuinely diverge (a refactor "
+    "collided with a feature, two incompatible behaviour changes touch the "
+    "same lines) such that picking either side would silently break code. "
+    "General caution is not a reason to abort. "
     "Never mention AI, automation, or bots in the commit message. "
     "Commit messages MUST follow Conventional Commits 1.0.0 — "
     "use `fix(merge): resolve conflicts with <base_branch>` or similar."
@@ -123,12 +138,12 @@ def build_user_prompt(context: CommentContext) -> str:
             ],
         },
         "rules": [
-            "Use decision=fix only if you are confident the comment is a real defect and you can fix it with the provided files.",
-            "Use decision=dismiss when the comment is a false positive, stylistic noise, obsolete, or already handled.",
-            "Use decision=skip when more repository context is required to fix safely.",
+            "Prefer decision=fix when the edit is contained to the file(s) shown — bias toward acting.",
+            "Use decision=dismiss when the comment is wrong, obsolete, stylistic noise, or already addressed.",
+            "Use decision=skip ONLY when fixing would require code that is not in the provided files. Caution or risk-aversion is not a valid reason to skip.",
             "For fix: include FULL replacement content for every file you change, not diffs.",
             "Do not wrap file content in markdown fences.",
-            "Keep replies under 400 characters.",
+            "Keep replies under 400 characters and never use the words AI, automation, webhook, or bot.",
         ],
         "repository": context.repository,
         "pull_request": context.pr_number,
@@ -144,14 +159,25 @@ def build_user_prompt(context: CommentContext) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
-def parse_decision(raw: str) -> Decision:
-    text = raw.strip()
+_THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+
+def _extract_json_body(raw: str) -> str:
+    """Strip a leading chain-of-thought block (reasoning models like
+    DeepSeek-R1 / deepseek-reasoner can prepend `<think>…</think>` even
+    when the system prompt forbids it) and any surrounding markdown
+    fences, so the inner JSON object survives for `json.loads`."""
+    text = _THINK_BLOCK_RE.sub("", raw).strip()
     if text.startswith("```"):
-        # Strip ```json ... ``` fencing if the model added it despite the prompt.
         text = text.strip("`")
         if text.lower().startswith("json"):
             text = text[4:]
         text = text.strip()
+    return text
+
+
+def parse_decision(raw: str) -> Decision:
+    text = _extract_json_body(raw)
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -196,9 +222,10 @@ def build_merge_user_prompt(context: MergeConflictContext) -> str:
             ],
         },
         "rules": [
+            "Prefer decision=resolve when every conflict has an obvious merge — bias toward acting.",
             "decision=resolve requires full resolved content for EVERY conflicted file listed below.",
-            "decision=abort when any conflict is ambiguous; leave files empty.",
-            "Strip all `<<<<<<<`, `=======`, `>>>>>>>` lines from resolved content.",
+            "decision=abort ONLY when picking a side would change semantics in a way that would silently break code. General caution is not a reason to abort.",
+            "Strip all `<<<<<<<`, `=======`, `>>>>>>>` lines from resolved content — markered content is rejected.",
             "Do not introduce unrelated changes; preserve formatting and trailing newlines.",
             "Do not wrap content in markdown fences.",
         ],
@@ -214,12 +241,7 @@ def build_merge_user_prompt(context: MergeConflictContext) -> str:
 
 
 def parse_merge_resolution(raw: str) -> MergeResolution:
-    text = raw.strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.lower().startswith("json"):
-            text = text[4:]
-        text = text.strip()
+    text = _extract_json_body(raw)
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:

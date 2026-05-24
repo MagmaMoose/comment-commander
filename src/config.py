@@ -157,9 +157,13 @@ def _truthy_default(value: str | None, default: bool) -> bool:
 
 
 def _default_model_for(provider: str) -> str:
+    # DeepSeek default uses the reasoner model: triage of "is this comment a
+    # real defect and what edit fixes it" is reasoning-heavy, and the chat
+    # model skipped trivially-fixable comments too often in practice. Tests
+    # don't hit a real API, so the change is observable only on deploy.
     return {
-        "deepseek": "deepseek-chat",
+        "deepseek": "deepseek-reasoner",
         "anthropic": "claude-haiku-4-5",
         "openai": "gpt-4o-mini",
-        "openrouter": "deepseek/deepseek-chat",
-    }.get(provider, "deepseek-chat")
+        "openrouter": "deepseek/deepseek-reasoner",
+    }.get(provider, "deepseek-reasoner")

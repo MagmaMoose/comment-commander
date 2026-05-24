@@ -49,6 +49,36 @@ def test_parse_decision_rejects_non_json():
         parse_decision("not json at all")
 
 
+def test_parse_decision_strips_thinking_block():
+    """deepseek-reasoner / R1-style models can emit `<think>...</think>` in
+    the response content despite the system-prompt instruction. The parser
+    has to recover the JSON tail."""
+    raw = (
+        "<think>OK let's see — this comment looks like a real defect, but I "
+        "should weigh dismissing vs fixing carefully...</think>\n"
+        + json.dumps({"decision": "fix", "reply": "done", "commitMessage": "fix: redact PAT", "files": []})
+    )
+    decision = parse_decision(raw)
+    assert decision.decision == "fix"
+    assert decision.commit_message == "fix: redact PAT"
+
+
+def test_parse_merge_resolution_strips_thinking_block():
+    raw = (
+        "<think>The conflict is on hello.txt; the feat-side change preserves "
+        "intent.</think>"
+        + json.dumps({
+            "decision": "resolve",
+            "reason": "kept feat side",
+            "commitMessage": "fix(merge): resolve hello.txt",
+            "files": [{"path": "hello.txt", "content": "feat\n"}],
+        })
+    )
+    resolution = parse_merge_resolution(raw)
+    assert resolution.decision == "resolve"
+    assert resolution.files[0].content == "feat\n"
+
+
 def test_build_user_prompt_includes_comment_and_files():
     context = CommentContext(
         repository="o/r",
