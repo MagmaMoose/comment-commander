@@ -790,8 +790,13 @@ def _commit_signed(repo_dir: Path, decision: Decision, settings: Settings) -> st
 
 
 def _commit_with_subject(repo_dir: Path, subject: str) -> str:
+    """Add all + commit. Signing is driven by `commit.gpgsign=true` set by
+    `configure_repo_signing` — we do not pass `-S` here because that flag
+    overrides the per-repo config, which breaks tests that need unsigned
+    commits and gives no production benefit (configure_repo_signing has
+    already set gpgsign=true on the repo)."""
     _run(["git", "-C", str(repo_dir), "add", "--all"])
-    _run(["git", "-C", str(repo_dir), "commit", "-S", "-m", subject])
+    _run(["git", "-C", str(repo_dir), "commit", "-m", subject])
     return _run(["git", "-C", str(repo_dir), "rev-parse", "HEAD"]).stdout.strip()
 
 
@@ -927,6 +932,21 @@ def _resolve_merge_conflicts(
         f"base={base_branch} head={head_branch}"
     )
 
+    def _notify(outcome: str, **extra: Any) -> None:
+        """Local helper so the four post-outcome sites stay terse and the
+        `result.add_slack_message` wiring lives in one place."""
+        ref = slack.notify_merge_resolution(
+            outcome=outcome,
+            repo=base_repo.full_name,
+            pr_number=pr_number,
+            base_branch=base_branch,
+            head_branch=head_branch,
+            host=instance.host,
+            **extra,
+        )
+        if result is not None:
+            result.add_slack_message(ref)
+
     # The triage path clones --depth 1, which doesn't have enough history
     # for git to compute a merge base against an unrelated branch. Unshallow
     # once; harmless if already complete. Git's "no-op" exits are non-zero
@@ -941,7 +961,7 @@ def _resolve_merge_conflicts(
     if unshallow.returncode != 0:
         logger.debug(
             "merge-followup: unshallow no-op %s stderr=%s",
-            log_kv, (unshallow.stderr or "").strip(),
+            log_kv, _redact_pat((unshallow.stderr or "").strip()),
         )
 
     fetch = subprocess.run(
@@ -949,9 +969,11 @@ def _resolve_merge_conflicts(
         capture_output=True, text=True,
     )
     if fetch.returncode != 0:
+        # Remote URL is configured with x-access-token:<PAT>@host, so any
+        # auth/network failure stderr can echo the PAT — redact before logging.
         logger.warning(
             "merge-followup: fetch base failed %s stderr=%s",
-            log_kv, (fetch.stderr or "").strip(),
+            log_kv, _redact_pat((fetch.stderr or "").strip()),
         )
         return
 
@@ -971,17 +993,12 @@ def _resolve_merge_conflicts(
             sha = _commit_with_subject(repo_dir, subject)
             _push(repo_dir, head_branch)
             logger.info("merge-followup: clean merge sha=%s %s", sha[:7], log_kv)
-            slack.notify_merge_resolution(
-                outcome="resolve",
-                repo=base_repo.full_name,
-                pr_number=pr_number,
-                base_branch=base_branch,
-                head_branch=head_branch,
+            _notify(
+                "resolve",
                 conflicted_paths=[],
                 commit_sha=sha,
                 commit_subject=subject,
                 reason="clean merge — no conflicts",
-                host=instance.host,
             )
         else:
             subprocess.run(
@@ -997,7 +1014,7 @@ def _resolve_merge_conflicts(
         # leave a half-merged state, and bail.
         logger.warning(
             "merge-followup: merge failed without conflicts %s stderr=%s",
-            log_kv, (merge.stderr or "").strip(),
+            log_kv, _redact_pat((merge.stderr or "").strip()),
         )
         subprocess.run(
             ["git", "-C", str(repo_dir), "merge", "--abort"],
@@ -1030,16 +1047,7 @@ def _resolve_merge_conflicts(
     except LLMError as exc:
         logger.warning("merge-followup: LLM error %s err=%s", log_kv, exc)
         _abort_merge(repo_dir)
-        slack.notify_merge_resolution(
-            outcome="abort",
-            repo=base_repo.full_name,
-            pr_number=pr_number,
-            base_branch=base_branch,
-            head_branch=head_branch,
-            conflicted_paths=conflicts,
-            reason=f"LLM error: {exc}",
-            host=instance.host,
-        )
+        _notify("abort", conflicted_paths=conflicts, reason=f"LLM error: {exc}")
         return
 
     if resolution.decision == "abort":
@@ -1048,15 +1056,10 @@ def _resolve_merge_conflicts(
             resolution.reason, log_kv,
         )
         _abort_merge(repo_dir)
-        slack.notify_merge_resolution(
-            outcome="abort",
-            repo=base_repo.full_name,
-            pr_number=pr_number,
-            base_branch=base_branch,
-            head_branch=head_branch,
+        _notify(
+            "abort",
             conflicted_paths=conflicts,
             reason=resolution.reason or "LLM declined to resolve",
-            host=instance.host,
         )
         return
 
@@ -1069,19 +1072,32 @@ def _resolve_merge_conflicts(
             sorted(missing), log_kv,
         )
         _abort_merge(repo_dir)
-        slack.notify_merge_resolution(
-            outcome="abort",
-            repo=base_repo.full_name,
-            pr_number=pr_number,
-            base_branch=base_branch,
-            head_branch=head_branch,
+        _notify(
+            "abort",
             conflicted_paths=conflicts,
             reason=f"LLM did not return content for: {sorted(missing)}",
-            host=instance.host,
         )
         return
 
-    _write_merge_resolutions(repo_dir, [f for f in resolution.files if f.path in expected])
+    to_apply = [f for f in resolution.files if f.path in expected]
+    # Reject any "resolved" file that still carries conflict markers — the
+    # model can echo the markered input back when it gets confused, and we
+    # must never push that to a real branch.
+    marker_offenders = [f.path for f in to_apply if _contains_conflict_markers(f.content)]
+    if marker_offenders:
+        logger.warning(
+            "merge-followup: LLM returned content with conflict markers paths=%s %s",
+            marker_offenders, log_kv,
+        )
+        _abort_merge(repo_dir)
+        _notify(
+            "abort",
+            conflicted_paths=conflicts,
+            reason=f"LLM resolution still contained conflict markers in: {marker_offenders}",
+        )
+        return
+
+    _write_merge_resolutions(repo_dir, to_apply)
     subject = _normalise_commit_subject(
         resolution.commit_message,
         fallback=f"fix(merge): resolve conflicts with {base_branch}",
@@ -1092,17 +1108,12 @@ def _resolve_merge_conflicts(
         "merge-followup: resolved sha=%s files=%d %s",
         sha[:7], len(conflicts), log_kv,
     )
-    slack.notify_merge_resolution(
-        outcome="resolve",
-        repo=base_repo.full_name,
-        pr_number=pr_number,
-        base_branch=base_branch,
-        head_branch=head_branch,
+    _notify(
+        "resolve",
         conflicted_paths=conflicts,
         commit_sha=sha,
         commit_subject=subject,
         reason=resolution.reason or "resolved",
-        host=instance.host,
     )
 
 
@@ -1150,6 +1161,17 @@ def _read_conflicted_snapshots(
             continue
         out.append(FileSnapshot(path=path, content=content))
     return out
+
+
+_MARKER_RE = re.compile(r"^(?:<{7}|={7}|>{7})(?: |\t|$)", re.MULTILINE)
+
+
+def _contains_conflict_markers(content: str) -> bool:
+    """True if `content` has a line that begins with seven `<`, `=`, or `>`
+    followed by a space, tab, or end-of-line — the shape of git's standard
+    conflict markers. Not a substring scan, so legitimate prose like
+    `<<<<<<<some` (no space) won't false-positive."""
+    return bool(_MARKER_RE.search(content))
 
 
 def _write_merge_resolutions(repo_dir: Path, files: list[FileChange]) -> None:

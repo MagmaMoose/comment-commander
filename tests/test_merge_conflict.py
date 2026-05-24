@@ -15,7 +15,7 @@ import pytest
 
 from github_client import GitHubInstance, RepositoryRef
 from llm.base import FileChange, MergeConflictContext, MergeResolution
-from processor import _resolve_merge_conflicts
+from processor import _contains_conflict_markers, _resolve_merge_conflicts
 from slack import SlackNotifier
 
 
@@ -242,6 +242,66 @@ def test_conflict_aborted_by_llm(
     head_after = _git("rev-parse", "HEAD", cwd=repo).stdout.strip()
     assert head_after == head_before
     # Working tree should be clean after the abort.
+    status = _git("status", "--porcelain", cwd=repo).stdout
+    assert status == ""
+
+
+def test_marker_detector_flags_real_markers_only():
+    """Detector must catch real `<<<<<<<`/`=======`/`>>>>>>>` lines without
+    false-positiving on prose that happens to contain that many of those
+    characters but no trailing space/EOL (e.g. `<<<<<<<some`)."""
+    assert _contains_conflict_markers("a\n<<<<<<< HEAD\nfoo\n=======\nbar\n>>>>>>> main\n")
+    assert _contains_conflict_markers("=======\n")
+    assert not _contains_conflict_markers("plain content with no markers\n")
+    assert not _contains_conflict_markers("<<<<<<<no-space-or-eol-after-this")
+
+
+def test_marker_in_llm_response_aborts(
+    tmp_path, settings, instance, base_repo, slack
+):
+    """If the LLM echoes conflict markers back as 'resolved' content, abort
+    the merge — never push a markered file."""
+    from conftest import StubProvider
+    from llm.base import Decision
+
+    origin = tmp_path / "origin.git"
+    _init_repo_with_main(tmp_path, origin, file_content="line1\nline2\n")
+    repo = _make_feature_branch(
+        tmp_path, origin, branch="feat", content="line1\nline2 from feat\n"
+    )
+    _advance_main(tmp_path / "seed", origin, new_content="line1\nline2 from main\n")
+    head_before = _git("rev-parse", "HEAD", cwd=repo).stdout.strip()
+
+    provider = StubProvider(
+        Decision(decision="dismiss", reply="n/a"),
+        merge_resolution=MergeResolution(
+            decision="resolve",
+            reason="LLM got confused",
+            commit_message="fix(merge): resolve",
+            files=[FileChange(
+                path="hello.txt",
+                # Model echoes conflict markers back in the "resolved" content.
+                content="line1\n<<<<<<< HEAD\nline2 from feat\n=======\nline2 from main\n>>>>>>> main\n",
+            )],
+        ),
+    )
+
+    s = replace(settings, merge_conflict_resolution=True, dry_run=False)
+    _resolve_merge_conflicts(
+        repo_dir=repo,
+        instance=instance,
+        base_repo=base_repo,
+        head_repo=base_repo,
+        head_branch="feat",
+        base_branch="main",
+        pr_number=1,
+        provider=provider,
+        settings=s,
+        slack=slack,
+    )
+
+    head_after = _git("rev-parse", "HEAD", cwd=repo).stdout.strip()
+    assert head_after == head_before, "markered content must never be pushed"
     status = _git("status", "--porcelain", cwd=repo).stdout
     assert status == ""
 
