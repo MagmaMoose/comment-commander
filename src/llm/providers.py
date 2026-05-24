@@ -1,8 +1,9 @@
 """Concrete LLM providers.
 
 All four wire-formats are reachable with raw httpx, so we avoid pulling in
-provider SDKs. New providers only need a `decide()` method that produces the
-JSON object described in `llm.base.build_user_prompt`.
+provider SDKs. New providers only need a `_chat()` method that turns a
+(system, user) prompt pair into the raw model response text; `decide()` and
+`resolve_merge()` are then shared.
 """
 from __future__ import annotations
 
@@ -16,9 +17,14 @@ from llm.base import (
     CommentContext,
     Decision,
     LLMError,
+    MERGE_SYSTEM_PROMPT,
+    MergeConflictContext,
+    MergeResolution,
     SYSTEM_PROMPT,
+    build_merge_user_prompt,
     build_user_prompt,
     parse_decision,
+    parse_merge_resolution,
 )
 
 logger = logging.getLogger(__name__)
@@ -50,8 +56,16 @@ class BaseProvider:
         self.model = cfg.model
         self._cfg = cfg
 
-    def decide(self, context: CommentContext) -> Decision:
+    def _chat(self, system: str, user: str) -> str:
         raise NotImplementedError
+
+    def decide(self, context: CommentContext) -> Decision:
+        return parse_decision(self._chat(SYSTEM_PROMPT, build_user_prompt(context)))
+
+    def resolve_merge(self, context: MergeConflictContext) -> MergeResolution:
+        return parse_merge_resolution(
+            self._chat(MERGE_SYSTEM_PROMPT, build_merge_user_prompt(context))
+        )
 
 
 class _OpenAICompatibleProvider(BaseProvider):
@@ -59,14 +73,13 @@ class _OpenAICompatibleProvider(BaseProvider):
 
     default_base_url: str = ""
 
-    def decide(self, context: CommentContext) -> Decision:
+    def _chat(self, system: str, user: str) -> str:
         base = self._cfg.base_url or self.default_base_url
-        user = build_user_prompt(context)
         body: dict[str, Any] = {
             "model": self.model,
             "temperature": 0.1,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
             "response_format": {"type": "json_object"},
@@ -92,7 +105,7 @@ class _OpenAICompatibleProvider(BaseProvider):
             raise LLMError(f"{self.name} response missing content: {data}") from exc
         if not isinstance(content, str):
             raise LLMError(f"{self.name} content not a string: {content!r}")
-        return parse_decision(content)
+        return content
 
 
 class DeepSeekProvider(_OpenAICompatibleProvider):
@@ -110,14 +123,13 @@ class OpenRouterProvider(_OpenAICompatibleProvider):
 class AnthropicProvider(BaseProvider):
     default_base_url = "https://api.anthropic.com/v1"
 
-    def decide(self, context: CommentContext) -> Decision:
+    def _chat(self, system: str, user: str) -> str:
         base = self._cfg.base_url or self.default_base_url
-        user = build_user_prompt(context)
         body = {
             "model": self.model,
             "max_tokens": 4096,
             "temperature": 0.1,
-            "system": SYSTEM_PROMPT,
+            "system": system,
             "messages": [{"role": "user", "content": user}],
         }
         response = httpx.post(
@@ -135,12 +147,11 @@ class AnthropicProvider(BaseProvider):
                 f"anthropic messages failed ({response.status_code}): {response.text[:200]}"
             )
         data = response.json()
-        content_blocks = data.get("content") or []
-        for block in content_blocks:
+        for block in data.get("content") or []:
             if isinstance(block, dict) and block.get("type") == "text":
                 text = block.get("text")
                 if isinstance(text, str):
-                    return parse_decision(text)
+                    return text
         raise LLMError(f"anthropic response had no text content: {data}")
 
 

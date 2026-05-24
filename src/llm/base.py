@@ -45,11 +45,29 @@ class Decision:
     files: list[FileChange] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class MergeConflictContext:
+    repository: str
+    pr_number: int
+    base_branch: str
+    head_branch: str
+    conflicted_files: list[FileSnapshot] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class MergeResolution:
+    decision: Literal["resolve", "abort"]
+    reason: str
+    commit_message: str | None = None
+    files: list[FileChange] = field(default_factory=list)
+
+
 class LLMProvider(Protocol):
     name: str
     model: str
 
     def decide(self, context: CommentContext) -> Decision: ...
+    def resolve_merge(self, context: MergeConflictContext) -> MergeResolution: ...
 
 
 SYSTEM_PROMPT = (
@@ -70,6 +88,24 @@ SYSTEM_PROMPT = (
     "`fix(atlantis): mount GCP SA key so terragrunt can read GCS state`, "
     "`chore(deps): pin mikrotik-minder Helm chart to 0.1.0`, "
     "`feat: add comment-commander GitRepository`."
+)
+
+
+MERGE_SYSTEM_PROMPT = (
+    "You resolve merge conflicts in a git repository. "
+    "You will be given a list of files containing standard git conflict "
+    "markers (`<<<<<<<`, `=======`, `>>>>>>>`) and the names of the base and "
+    "head branches. Return only valid JSON matching the requested shape. "
+    "If every conflict can be resolved safely from the markers alone — keep "
+    "behaviour, prefer the side that matches the head branch's intent, and "
+    "preserve both sides when they're complementary — return decision=resolve "
+    "with the full resolved contents (NO conflict markers) for every "
+    "conflicted file. If any conflict is genuinely ambiguous (semantics "
+    "differ, refactor collided with new feature, no obvious correct merge), "
+    "return decision=abort and leave files empty. "
+    "Never mention AI, automation, or bots in the commit message. "
+    "Commit messages MUST follow Conventional Commits 1.0.0 — "
+    "use `fix(merge): resolve conflicts with <base_branch>` or similar."
 )
 
 
@@ -141,6 +177,74 @@ def parse_decision(raw: str) -> Decision:
     return Decision(
         decision=decision,
         reply=data.get("reply") or "",
+        commit_message=data.get("commitMessage") if isinstance(data.get("commitMessage"), str) else None,
+        files=files,
+    )
+
+
+def build_merge_user_prompt(context: MergeConflictContext) -> str:
+    payload = {
+        "required_response_shape": {
+            "decision": "resolve | abort",
+            "reason": "short string explaining the call",
+            "commitMessage": "required for resolve; Conventional Commits 1.0.0 — e.g. `fix(merge): resolve conflicts with <base_branch>`",
+            "files": [
+                {
+                    "path": "repo-relative path (MUST match one of the provided conflicted files)",
+                    "content": "full resolved file contents — no conflict markers",
+                }
+            ],
+        },
+        "rules": [
+            "decision=resolve requires full resolved content for EVERY conflicted file listed below.",
+            "decision=abort when any conflict is ambiguous; leave files empty.",
+            "Strip all `<<<<<<<`, `=======`, `>>>>>>>` lines from resolved content.",
+            "Do not introduce unrelated changes; preserve formatting and trailing newlines.",
+            "Do not wrap content in markdown fences.",
+        ],
+        "repository": context.repository,
+        "pull_request": context.pr_number,
+        "base_branch": context.base_branch,
+        "head_branch": context.head_branch,
+        "conflicted_files": [
+            {"path": f.path, "content": f.content} for f in context.conflicted_files
+        ],
+    }
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def parse_merge_resolution(raw: str) -> MergeResolution:
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:]
+        text = text.strip()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise LLMError(f"Provider returned non-JSON: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise LLMError("Provider returned a non-object JSON payload")
+
+    decision = data.get("decision")
+    if decision not in {"resolve", "abort"}:
+        raise LLMError(f"Invalid merge decision value: {decision!r}")
+
+    files_raw = data.get("files") if isinstance(data.get("files"), list) else []
+    files: list[FileChange] = []
+    for entry in files_raw:
+        if not isinstance(entry, dict):
+            continue
+        path = entry.get("path")
+        content = entry.get("content")
+        if isinstance(path, str) and isinstance(content, str):
+            files.append(FileChange(path=path, content=content))
+
+    return MergeResolution(
+        decision=decision,
+        reason=data.get("reason") if isinstance(data.get("reason"), str) else "",
         commit_message=data.get("commitMessage") if isinstance(data.get("commitMessage"), str) else None,
         files=files,
     )

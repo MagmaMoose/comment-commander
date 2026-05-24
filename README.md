@@ -15,7 +15,9 @@ For every Copilot review comment on a PR you've subscribed via webhook:
    - **fix** — writes the model's file changes, makes a signed commit, and resolves the thread after pushing.
    - **dismiss** — replies briefly explaining why and resolves the thread.
    - **skip** — replies that the bot couldn't safely fix it and leaves the thread open for you.
-4. Pushes once at the end, cleans up the temp directory.
+4. Pushes once at the end.
+5. **Smart follow-up merge resolution** (kill-switch: `MERGE_CONFLICT_RESOLUTION=false`). After the push, fetches the PR's base branch and attempts a merge. On conflict, sends each conflicted file (with markers) to the LLM and asks for full resolved contents. If the model returns a complete resolution it's committed (signed) and pushed as a single `fix(merge): …` commit; if the model declines or its resolution is partial, `git merge --abort` runs and the PR is left as-is — never pushes a half-resolved state.
+6. Cleans up the temp directory.
 
 Commits are signed with an SSH ed25519 key that matches `~/.gitconfig`, so they show as verified on GitHub.
 
@@ -119,6 +121,7 @@ Non-sensitive runtime knobs (set on the deployment):
 | `MAX_FILE_BYTES`            | `180000`                                               |
 | `MAX_COMMENTS_PER_EVENT`    | `10`                                                   |
 | `DRY_RUN`                   | `false`                                                |
+| `MERGE_CONFLICT_RESOLUTION` | `true` (set `false` to disable the post-push merge follow-up) |
 | `LOG_LEVEL`                 | `INFO`                                                 |
 | `DEDUPE_DB_PATH`            | `/var/lib/comment-commander/deliveries.db`             |
 

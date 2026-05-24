@@ -6,6 +6,8 @@ from llm.base import (
     FileSnapshot,
     LLMError,
     LLMProvider,
+    MergeConflictContext,
+    MergeResolution,
 )
 from llm.providers import build_provider
 
@@ -16,5 +18,7 @@ __all__ = [
     "FileSnapshot",
     "LLMError",
     "LLMProvider",
+    "MergeConflictContext",
+    "MergeResolution",
     "build_provider",
 ]

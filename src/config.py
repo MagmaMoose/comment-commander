@@ -53,6 +53,7 @@ class Settings:
     max_file_bytes: int
     max_comments_per_event: int
     dry_run: bool
+    merge_conflict_resolution: bool
 
     # Public surface
     public_webhook_url: str | None
@@ -105,6 +106,9 @@ class Settings:
                 os.environ.get("MAX_COMMENTS_PER_EVENT"), DEFAULT_MAX_COMMENTS_PER_EVENT
             ),
             dry_run=_truthy(os.environ.get("DRY_RUN")),
+            merge_conflict_resolution=_truthy_default(
+                os.environ.get("MERGE_CONFLICT_RESOLUTION"), True
+            ),
             public_webhook_url=(os.environ.get("PUBLIC_WEBHOOK_URL") or None),
             slack_bot_token=(os.environ.get("SLACK_BOT_TOKEN") or None),
             slack_channel_id=(os.environ.get("SLACK_CHANNEL_ID") or None),
@@ -140,6 +144,16 @@ def _positive_int(value: str | None, fallback: int) -> int:
 
 def _truthy(value: str | None) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _truthy_default(value: str | None, default: bool) -> bool:
+    """Like `_truthy` but returns `default` when the env var is unset.
+
+    Lets us ship features as default-on (e.g. MERGE_CONFLICT_RESOLUTION)
+    while still allowing an explicit `false`/`0` kill-switch."""
+    if value is None or not value.strip():
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _default_model_for(provider: str) -> str:
