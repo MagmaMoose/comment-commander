@@ -2,6 +2,33 @@
 
 <!-- version list -->
 
+## v1.9.0 (2026-05-25)
+
+### Bug Fixes
+
+- **processor**: Address Copilot review on merge follow-up
+  ([`fe8f10f`](https://github.com/MagmaMoose/comment-commander/commit/fe8f10fd048bc4aca600240be7d766cbbf01b84e))
+
+- **triggers**: Record real subprocess error in TriggerResult.error
+  ([`0095eb0`](https://github.com/MagmaMoose/comment-commander/commit/0095eb0efac17b83c8f94496c3c0afa93a6b71d7))
+
+### Chores
+
+- Add Claude Code context optimization scaffold
+  ([`90dcaab`](https://github.com/MagmaMoose/comment-commander/commit/90dcaab72b477a6498b15476c7b2f886a1867153))
+
+- Update comment-commander image
+  ([`9319965`](https://github.com/MagmaMoose/comment-commander/commit/93199658352b55afca7aa4181058010cb1dc9eb3))
+
+### Features
+
+- **llm**: Bias triage prompts toward action; switch DeepSeek to reasoner
+  ([`b4251df`](https://github.com/MagmaMoose/comment-commander/commit/b4251dfe8bf5235f52e0649c82cbee86042a77d2))
+
+- **processor**: Auto-resolve merge conflicts after the comment-fix push
+  ([`5618514`](https://github.com/MagmaMoose/comment-commander/commit/5618514a3376e6e960ac5af5f1276529b63d152c))
+
+
 ## v1.8.0 (2026-05-24)
 
 ### Chores
