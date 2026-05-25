@@ -1,0 +1,118 @@
+{
+  "generated": "2026-05-24T00:00:00Z",
+  "summary": "Self-hosted FastAPI webhook receiver. Verifies GitHub PR review-comment webhooks, asks a cheap LLM to fix/dismiss/skip each Copilot comment, then pushes verified SSH-signed commits attributed to the user. Multi-instance (github.com + GHE). No GitHub Actions, no bot author.",
+  "entrypoints": [
+    "src/main.py:create_app (FastAPI factory; Dockerfile CMD: uvicorn main:create_app --factory)"
+  ],
+  "routes": {
+    "GET /health": "liveness, suppressed from access log",
+    "POST /webhook": "HMAC-verified GitHub event ingress; dedupes by delivery-id; returns 202; processes in background",
+    "POST /process": "manual re-walk of a PR (X-Trigger-Token auth, bypasses INVOLVED_USERS, all authors)",
+    "GET /process/{trigger_id}": "trigger status lookup",
+    "GET /runs": "recent trigger runs",
+    "POST /setup-webhook": "programmatically register webhook on repo or org (matches GHE host via PAT routing)"
+  },
+  "modules": {
+    "main": {
+      "path": "src/main.py",
+      "purpose": "FastAPI app factory + all HTTP handlers; wires settings, GH client, LLM, dedupe, slack, signing.",
+      "exports": ["create_app"],
+      "depends_on": ["config", "dedupe", "github_client", "llm", "processor", "signing", "slack", "triggers"]
+    },
+    "processor": {
+      "path": "src/processor.py",
+      "purpose": "Core triage loop. Clones PR branch, walks unresolved Copilot threads, calls LLM, applies file changes, makes signed commit, pushes, resolves thread. Hosts post-webhook sweep (handles every comment from a single trigger). After our push, runs `_resolve_merge_conflicts` as a follow-up: unshallow + fetch base, attempt merge, on conflict ask LLM for full resolved files, commit signed, push again. Kill-switch: settings.merge_conflict_resolution.",
+      "exports": ["extract_jobs", "parse_pr_url", "process_jobs", "process_pr_manual", "ReviewJob", "ProcessorError"],
+      "depends_on": ["config", "github_client", "llm", "signing", "slack", "triggers"]
+    },
+    "github_client": {
+      "path": "src/github_client.py",
+      "purpose": "REST + GraphQL client. Supports github.com and arbitrary GHE host. Verifies HMAC signatures. Multi-instance routing via find_instance_for_host / find_instance_for_payload.",
+      "exports": ["GitHubClient", "GitHubInstance", "GitHubError", "RepositoryRef", "ReviewComment", "ReviewThread", "verify_signature", "parse_review_comment", "find_instance_for_host", "find_instance_for_payload"],
+      "depends_on": []
+    },
+    "config": {
+      "path": "src/config.py",
+      "purpose": "Frozen Settings dataclass loaded from env. Required secrets fail-fast at boot. Multi-instance: github.com always on; GHE only if GHE_HOST + GHE_PAT + GHE_AUTHOR_* all set.",
+      "exports": ["Settings"],
+      "depends_on": ["github_client"]
+    },
+    "dedupe": {
+      "path": "src/dedupe.py",
+      "purpose": "SQLite-backed seen-delivery store. Survives pod restarts via PVC. Used to drop GitHub webhook retries.",
+      "exports": ["DeliveryStore"],
+      "depends_on": []
+    },
+    "signing": {
+      "path": "src/signing.py",
+      "purpose": "Installs SSH ed25519 signing key at 0600 into ~/.ssh; configures per-repo git user/signing so commits show as verified.",
+      "exports": ["install_ssh_signing_key", "configure_repo_signing", "SigningError"],
+      "depends_on": []
+    },
+    "slack": {
+      "path": "src/slack.py",
+      "purpose": "Optional Slack notifier (chat.postMessage). No-op when SLACK_BOT_TOKEN or SLACK_CHANNEL_ID unset. Returns permalink for run tracking.",
+      "exports": ["SlackNotifier"],
+      "depends_on": []
+    },
+    "triggers": {
+      "path": "src/triggers.py",
+      "purpose": "In-memory + persisted store of /process trigger runs, surfaced via /runs and /process/{id}.",
+      "exports": ["TriggerStore", "TriggerResult"],
+      "depends_on": []
+    },
+    "llm": {
+      "path": "src/llm/",
+      "purpose": "Provider abstraction. Two prompt/response shapes: `decide(CommentContext) -> Decision` (fix/dismiss/skip) for triage, and `resolve_merge(MergeConflictContext) -> MergeResolution` (resolve/abort) for follow-up merge resolution. Providers share a `_chat(system, user) -> str` method so both flows reuse one HTTP call. Providers: DeepSeek, OpenAI, Anthropic, OpenRouter (OpenAI-compatible base for three of them).",
+      "exports": ["build_provider", "LLMProvider", "CommentContext", "Decision", "FileChange", "FileSnapshot", "MergeConflictContext", "MergeResolution", "LLMError"],
+      "depends_on": []
+    }
+  },
+  "callgraph_highlights": [
+    {
+      "caller": "main.webhook",
+      "calls": ["github_client.verify_signature", "dedupe.DeliveryStore.seen", "processor.extract_jobs", "processor.process_jobs"],
+      "note": "Webhook hot path. Verify -> dedupe -> 202 immediately -> background process_jobs."
+    },
+    {
+      "caller": "processor.process_jobs",
+      "calls": ["processor._process_pr_locked", "github_client.GitHubClient.fetch_unresolved_review_threads", "llm.LLMProvider.decide", "processor._apply_files", "processor._commit_signed", "processor._push", "github_client.GitHubClient.resolve_review_thread"],
+      "note": "Per-PR lock prevents concurrent push races (v1.6.1 fix). Sweep variant in v1.8.0 walks every unresolved thread on the PR after the webhook trigger."
+    },
+    {
+      "caller": "main.process_pr (POST /process)",
+      "calls": ["processor.parse_pr_url", "processor.process_pr_manual"],
+      "note": "Bypasses BOT_LOGINS allowlist and INVOLVED_USERS whitelist. Bot replies carry hidden <!-- comment-commander --> marker so re-runs never loop."
+    },
+    {
+      "caller": "main.setup_webhook (POST /setup-webhook)",
+      "calls": ["main._parse_target", "github_client.find_instance_for_host", "github_client.GitHubClient.create_repo_hook", "github_client.GitHubClient.create_org_hook"],
+      "note": "Routes by host to pick PAT (github.com vs GHE); requires admin:repo_hook or admin:org_hook on the matched PAT."
+    },
+    {
+      "caller": "processor._commit_signed",
+      "calls": ["signing.configure_repo_signing", "subprocess git -c gpg.format=ssh commit -S"],
+      "note": "Subject derived from Decision.commit_message (Conventional Commits). Each actionable comment = one signed commit; no squashing."
+    },
+    {
+      "caller": "processor._resolve_merge_conflicts",
+      "calls": ["git fetch --unshallow", "git fetch origin <base>", "git merge --no-commit --no-ff origin/<base>", "llm.LLMProvider.resolve_merge", "_write_merge_resolutions", "_commit_with_subject", "_push", "slack.SlackNotifier.notify_merge_resolution"],
+      "note": "Post-push follow-up inside _process_pr_locked. Loop-safe (single trigger). On conflict, full file contents with markers go to LLM; LLM returns full resolved content or aborts. Partial coverage from LLM is treated as abort. `git merge --abort` on every failure path so PR stays consistent."
+    }
+  ],
+  "hotspots": [
+    "src/processor.py — biggest churn; triage loop, sweep, locking, commit/push, merge resolution",
+    "src/main.py — endpoint handlers; most route additions land here",
+    "src/github_client.py — REST/GraphQL surface; new GH features land here",
+    "src/llm/providers.py — provider configs; default models; shared _chat()",
+    "src/llm/base.py — prompt builders + JSON parsers (triage + merge)",
+    "tests/conftest.py — fixtures that mock GH, LLM, signing"
+  ],
+  "infra": {
+    "deploy": "k8s/overlays/prod (kustomize); ExternalSecrets from OCI vault + OnePasswordItem for signing key",
+    "image": "ghcr.io/magmamoose/comment-commander:v* via semantic-release, multi-arch via docker-bake.hcl",
+    "tunnel": "cloudflared (cloudflared-tunnel.yaml)",
+    "ci": ".github/workflows/ci.yml (pytest + conditional pr-N image), release.yml (semantic-release)"
+  },
+  "stack": "Python 3.12, FastAPI 0.115, uvicorn, httpx, pytest+respx; deps in requirements.txt / requirements-dev.txt"
+}

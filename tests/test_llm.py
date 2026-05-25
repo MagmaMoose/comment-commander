@@ -8,9 +8,13 @@ import pytest
 
 from llm.base import (
     CommentContext,
+    FileSnapshot,
     LLMError,
-    parse_decision,
+    MergeConflictContext,
+    build_merge_user_prompt,
     build_user_prompt,
+    parse_decision,
+    parse_merge_resolution,
 )
 from llm.providers import build_provider
 
@@ -43,6 +47,36 @@ def test_parse_decision_rejects_bad_decision():
 def test_parse_decision_rejects_non_json():
     with pytest.raises(LLMError):
         parse_decision("not json at all")
+
+
+def test_parse_decision_strips_thinking_block():
+    """deepseek-reasoner / R1-style models can emit `<think>...</think>` in
+    the response content despite the system-prompt instruction. The parser
+    has to recover the JSON tail."""
+    raw = (
+        "<think>OK let's see — this comment looks like a real defect, but I "
+        "should weigh dismissing vs fixing carefully...</think>\n"
+        + json.dumps({"decision": "fix", "reply": "done", "commitMessage": "fix: redact PAT", "files": []})
+    )
+    decision = parse_decision(raw)
+    assert decision.decision == "fix"
+    assert decision.commit_message == "fix: redact PAT"
+
+
+def test_parse_merge_resolution_strips_thinking_block():
+    raw = (
+        "<think>The conflict is on hello.txt; the feat-side change preserves "
+        "intent.</think>"
+        + json.dumps({
+            "decision": "resolve",
+            "reason": "kept feat side",
+            "commitMessage": "fix(merge): resolve hello.txt",
+            "files": [{"path": "hello.txt", "content": "feat\n"}],
+        })
+    )
+    resolution = parse_merge_resolution(raw)
+    assert resolution.decision == "resolve"
+    assert resolution.files[0].content == "feat\n"
 
 
 def test_build_user_prompt_includes_comment_and_files():
@@ -136,3 +170,83 @@ def test_anthropic_provider_posts_messages(monkeypatch):
 def test_unknown_provider_raises():
     with pytest.raises(LLMError):
         build_provider("madeupcorp", "k", "m")
+
+
+def test_parse_merge_resolution_resolve():
+    raw = json.dumps({
+        "decision": "resolve",
+        "reason": "kept feat side; semantics preserved",
+        "commitMessage": "fix(merge): resolve hello.txt with feat side",
+        "files": [{"path": "hello.txt", "content": "line1\nline2 from feat\n"}],
+    })
+    resolution = parse_merge_resolution(raw)
+    assert resolution.decision == "resolve"
+    assert resolution.commit_message.startswith("fix(merge):")
+    assert resolution.files[0].path == "hello.txt"
+    assert "<<<<<<<" not in resolution.files[0].content
+
+
+def test_parse_merge_resolution_abort():
+    raw = json.dumps({
+        "decision": "abort",
+        "reason": "ambiguous semantics",
+        "files": [],
+    })
+    resolution = parse_merge_resolution(raw)
+    assert resolution.decision == "abort"
+    assert resolution.files == []
+
+
+def test_parse_merge_resolution_rejects_invalid_decision():
+    with pytest.raises(LLMError):
+        parse_merge_resolution(json.dumps({"decision": "skip"}))
+
+
+def test_build_merge_user_prompt_includes_branches_and_files():
+    ctx = MergeConflictContext(
+        repository="o/r",
+        pr_number=42,
+        base_branch="main",
+        head_branch="feat/x",
+        conflicted_files=[FileSnapshot(path="a.py", content="<<<<<<< HEAD\nfoo\n=======\nbar\n>>>>>>> main\n")],
+    )
+    raw = build_merge_user_prompt(ctx)
+    payload = json.loads(raw)
+    assert payload["base_branch"] == "main"
+    assert payload["head_branch"] == "feat/x"
+    assert payload["conflicted_files"][0]["path"] == "a.py"
+    assert "<<<<<<<" in payload["conflicted_files"][0]["content"]
+
+
+def test_resolve_merge_uses_chat(monkeypatch):
+    """resolve_merge should hit the same chat endpoint with the merge prompt."""
+    captured: dict = {}
+
+    def fake_post(url, *, json, headers, timeout):
+        captured["url"] = url
+        captured["json"] = json
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": '{"decision":"abort","reason":"ambiguous"}'}}
+                ]
+            },
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    provider = build_provider("deepseek", "k", "deepseek-chat")
+    resolution = provider.resolve_merge(
+        MergeConflictContext(
+            repository="o/r",
+            pr_number=1,
+            base_branch="main",
+            head_branch="feat",
+            conflicted_files=[FileSnapshot(path="a.py", content="<<<<<<<\n")],
+        )
+    )
+    assert resolution.decision == "abort"
+    # System message should be the merge prompt, not the triage prompt.
+    sys_msg = captured["json"]["messages"][0]
+    assert sys_msg["role"] == "system"
+    assert "merge conflict" in sys_msg["content"].lower()

@@ -29,6 +29,8 @@ from llm import (
     FileSnapshot,
     LLMError,
     LLMProvider,
+    MergeConflictContext,
+    MergeResolution,
 )
 from signing import configure_repo_signing
 from slack import SlackNotifier
@@ -94,6 +96,7 @@ class ReviewJob:
     base_repo: RepositoryRef
     head_repo: RepositoryRef
     head_branch: str
+    base_branch: str
     pr_number: int
     review_id: int | None
     comment: ReviewComment | None
@@ -136,9 +139,13 @@ def extract_jobs(payload: dict[str, Any], event: str, settings: Settings) -> lis
 
     head = pull.get("head") or {}
     branch = head.get("ref") if isinstance(head, dict) else None
+    base = pull.get("base") or {}
+    base_branch = base.get("ref") if isinstance(base, dict) else None
     pr_number = pull.get("number")
     if not isinstance(branch, str) or not isinstance(pr_number, int):
         return []
+    if not isinstance(base_branch, str) or not base_branch:
+        base_branch = ""  # follow-up merge resolution will no-op without it
     head_repo = _parse_repo(head.get("repo")) or repo
 
     if event == "pull_request_review_comment":
@@ -155,6 +162,7 @@ def extract_jobs(payload: dict[str, Any], event: str, settings: Settings) -> lis
             base_repo=repo,
             head_repo=head_repo,
             head_branch=branch,
+            base_branch=base_branch,
             pr_number=pr_number,
             review_id=None,
             comment=comment,
@@ -175,6 +183,7 @@ def extract_jobs(payload: dict[str, Any], event: str, settings: Settings) -> lis
             base_repo=repo,
             head_repo=head_repo,
             head_branch=branch,
+            base_branch=base_branch,
             pr_number=pr_number,
             review_id=review_id,
             comment=None,
@@ -258,6 +267,10 @@ def process_pr_manual(
                 trigger_id, repo.full_name, pr_number,
             )
             return
+        base_ref_obj = pr.get("base") or {}
+        base_branch = base_ref_obj.get("ref") if isinstance(base_ref_obj, dict) else None
+        if not isinstance(base_branch, str):
+            base_branch = ""
 
         try:
             all_comments = gh.list_pr_review_comments(repo, pr_number)
@@ -285,6 +298,7 @@ def process_pr_manual(
             base_repo=repo,
             head_repo=head_repo,
             head_branch=head_branch,
+            base_branch=base_branch,
             pr_number=pr_number,
             comments=actionable,
             settings=settings,
@@ -340,6 +354,7 @@ def process_jobs(
             base_repo=first.base_repo,
             head_repo=first.head_repo,
             head_branch=first.head_branch,
+            base_branch=first.base_branch,
             pr_number=first.pr_number,
             comments=comments,
             settings=settings,
@@ -431,6 +446,7 @@ def _process_pr_locked(
     base_repo: RepositoryRef,
     head_repo: RepositoryRef,
     head_branch: str,
+    base_branch: str,
     pr_number: int,
     comments: list[ReviewComment],
     settings: Settings,
@@ -621,6 +637,37 @@ def _process_pr_locked(
             _push(repo_dir, head_branch)
             logger.info("pushed branch=%s repo=%s", head_branch, head_repo.full_name)
 
+        # Follow-up merge resolution. Runs in the same trigger so it can't
+        # loop — the resolve-commit doesn't fan a webhook back to us. Skipped
+        # silently when the kill-switch is off, in dry-run, or when we don't
+        # know the base branch (older payload shapes, manual w/ no base).
+        if (
+            committed_any
+            and base_branch
+            and settings.merge_conflict_resolution
+            and not settings.dry_run
+        ):
+            try:
+                _resolve_merge_conflicts(
+                    repo_dir=repo_dir,
+                    instance=instance,
+                    base_repo=base_repo,
+                    head_repo=head_repo,
+                    head_branch=head_branch,
+                    base_branch=base_branch,
+                    pr_number=pr_number,
+                    provider=provider,
+                    settings=settings,
+                    slack=slack,
+                    result=result,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Comment fixes are already pushed; never break the main flow.
+                logger.warning(
+                    "merge-conflict resolution raised pr=%s repo=%s err=%r",
+                    pr_number, base_repo.full_name, exc,
+                )
+
         for pending_reply in replies:
             replied = False
             resolved = False
@@ -739,9 +786,17 @@ def _clone(
 
 
 def _commit_signed(repo_dir: Path, decision: Decision, settings: Settings) -> str:
+    return _commit_with_subject(repo_dir, _commit_subject(decision))
+
+
+def _commit_with_subject(repo_dir: Path, subject: str) -> str:
+    """Add all + commit. Signing is driven by `commit.gpgsign=true` set by
+    `configure_repo_signing` — we do not pass `-S` here because that flag
+    overrides the per-repo config, which breaks tests that need unsigned
+    commits and gives no production benefit (configure_repo_signing has
+    already set gpgsign=true on the repo)."""
     _run(["git", "-C", str(repo_dir), "add", "--all"])
-    message = _commit_subject(decision)
-    _run(["git", "-C", str(repo_dir), "commit", "-S", "-m", message])
+    _run(["git", "-C", str(repo_dir), "commit", "-m", subject])
     return _run(["git", "-C", str(repo_dir), "rev-parse", "HEAD"]).stdout.strip()
 
 
@@ -782,6 +837,44 @@ def _redact_pat(arg: str) -> str:
     return re.sub(r"://x-access-token:[^@]+@", "://x-access-token:***@", arg)
 
 
+_ERROR_SUMMARY_MAX = 500
+
+
+def summarize_exception(exc: BaseException) -> str:
+    """One-line summary suitable for `TriggerResult.error`.
+
+    Before this existed, `/process` stored only `type(exc).__name__`, which
+    surfaced opaque entries like "CalledProcessError" in the runs UI with no
+    hint at which git step failed. For `CalledProcessError` we now attach
+    the redacted command and the first non-empty line of stderr (or stdout
+    when stderr is silent — git push sometimes uses stdout for its rejection
+    message). For everything else, include the exception's `str()` so
+    GitHubError / LLMError messages survive."""
+    name = type(exc).__name__
+    if isinstance(exc, subprocess.CalledProcessError):
+        cmd_args = exc.cmd if isinstance(exc.cmd, (list, tuple)) else [str(exc.cmd or "")]
+        cmd = " ".join(_redact_pat(str(a)) for a in cmd_args)
+        text = (exc.stderr or exc.stdout or "")
+        if isinstance(text, (bytes, bytearray)):
+            try:
+                text = text.decode("utf-8", "replace")
+            except Exception:  # noqa: BLE001 - belt-and-braces, decode never raises here
+                text = ""
+        detail = next(
+            (line.strip() for line in str(text).splitlines() if line.strip()),
+            "",
+        )
+        summary = f"{name} rc={exc.returncode} cmd={cmd!r}"
+        if detail:
+            summary += f" stderr={detail!r}"
+    else:
+        message = str(exc).strip()
+        summary = f"{name}: {message}" if message else name
+    if len(summary) > _ERROR_SUMMARY_MAX:
+        summary = summary[: _ERROR_SUMMARY_MAX - 1] + "…"
+    return summary
+
+
 _CONVENTIONAL_COMMIT_TYPES = (
     "feat", "fix", "chore", "refactor", "docs", "test",
     "style", "perf", "build", "ci", "revert",
@@ -792,21 +885,318 @@ _CONVENTIONAL_COMMIT_RE = re.compile(
 
 
 def _commit_subject(decision: Decision) -> str:
-    """Normalise the LLM's commit subject into a Conventional Commits header.
+    return _normalise_commit_subject(
+        decision.commit_message, fallback="fix: address PR review feedback"
+    )
+
+
+def _normalise_commit_subject(raw: str | None, *, fallback: str) -> str:
+    """Normalise an LLM commit subject into a Conventional Commits header.
 
     The system prompt instructs the model to comply, but we don't trust
-    that — when it forgets, prefix `fix:` (most Copilot findings are
-    bug fixes) and lower-case the first letter so the subject reads
-    naturally after the colon.
+    that — when it forgets, prefix `fix:` (most findings are bug fixes)
+    and lower-case the first letter so the subject reads naturally
+    after the colon.
     """
-    lines = (decision.commit_message or "").splitlines()
-    raw = (lines[0] if lines else "").strip().rstrip(".")
-    if not raw:
-        return "fix: address PR review feedback"
-    if _CONVENTIONAL_COMMIT_RE.match(raw):
-        return raw
-    head = raw[0].lower() + raw[1:] if raw[0].isupper() else raw
+    lines = (raw or "").splitlines()
+    first = (lines[0] if lines else "").strip().rstrip(".")
+    if not first:
+        return fallback
+    if _CONVENTIONAL_COMMIT_RE.match(first):
+        return first
+    head = first[0].lower() + first[1:] if first[0].isupper() else first
     return f"fix: {head}"
+
+
+def _resolve_merge_conflicts(
+    *,
+    repo_dir: Path,
+    instance: GitHubInstance,
+    base_repo: RepositoryRef,
+    head_repo: RepositoryRef,
+    head_branch: str,
+    base_branch: str,
+    pr_number: int,
+    provider: LLMProvider,
+    settings: Settings,
+    slack: SlackNotifier,
+    result: TriggerResult | None = None,
+) -> None:
+    """Follow-up step run after our own push. Tries to merge base into the
+    PR branch; on conflict, asks the LLM for full resolved file contents,
+    commits a signed merge resolution, and pushes. If anything looks
+    ambiguous, aborts the merge and leaves the PR conflicted — never pushes
+    a half-resolved state."""
+    log_kv = (
+        f"pr={pr_number} repo={base_repo.full_name} "
+        f"base={base_branch} head={head_branch}"
+    )
+
+    def _notify(outcome: str, **extra: Any) -> None:
+        """Local helper so the four post-outcome sites stay terse and the
+        `result.add_slack_message` wiring lives in one place."""
+        ref = slack.notify_merge_resolution(
+            outcome=outcome,
+            repo=base_repo.full_name,
+            pr_number=pr_number,
+            base_branch=base_branch,
+            head_branch=head_branch,
+            host=instance.host,
+            **extra,
+        )
+        if result is not None:
+            result.add_slack_message(ref)
+
+    # The triage path clones --depth 1, which doesn't have enough history
+    # for git to compute a merge base against an unrelated branch. Unshallow
+    # once; harmless if already complete. Git's "no-op" exits are non-zero
+    # with messages like "is not a shallow repository" or "--unshallow on a
+    # complete repository does not make sense" — both benign, so we ignore
+    # the failure entirely. Real network errors will surface at the next
+    # fetch step below.
+    unshallow = subprocess.run(
+        ["git", "-C", str(repo_dir), "fetch", "--unshallow", "origin"],
+        capture_output=True, text=True,
+    )
+    if unshallow.returncode != 0:
+        logger.debug(
+            "merge-followup: unshallow no-op %s stderr=%s",
+            log_kv, _redact_pat((unshallow.stderr or "").strip()),
+        )
+
+    fetch = subprocess.run(
+        ["git", "-C", str(repo_dir), "fetch", "origin", base_branch],
+        capture_output=True, text=True,
+    )
+    if fetch.returncode != 0:
+        # Remote URL is configured with x-access-token:<PAT>@host, so any
+        # auth/network failure stderr can echo the PAT — redact before logging.
+        logger.warning(
+            "merge-followup: fetch base failed %s stderr=%s",
+            log_kv, _redact_pat((fetch.stderr or "").strip()),
+        )
+        return
+
+    base_ref = f"origin/{base_branch}"
+    merge = subprocess.run(
+        ["git", "-C", str(repo_dir), "merge", "--no-commit", "--no-ff", base_ref],
+        capture_output=True, text=True,
+    )
+    conflicts = _list_conflicted_files(repo_dir)
+
+    if merge.returncode == 0 and not conflicts:
+        # Either base already merged into head, or a fast-forward / clean
+        # merge with staged changes. Finalise only if there's something to
+        # commit; otherwise abort to leave the index clean.
+        if _has_staged_changes(repo_dir):
+            subject = f"chore(merge): merge {base_ref} into {head_branch}"
+            sha = _commit_with_subject(repo_dir, subject)
+            _push(repo_dir, head_branch)
+            logger.info("merge-followup: clean merge sha=%s %s", sha[:7], log_kv)
+            _notify(
+                "resolve",
+                conflicted_paths=[],
+                commit_sha=sha,
+                commit_subject=subject,
+                reason="clean merge — no conflicts",
+            )
+        else:
+            subprocess.run(
+                ["git", "-C", str(repo_dir), "merge", "--abort"],
+                capture_output=True, text=True,
+            )
+            logger.info("merge-followup: already up to date %s", log_kv)
+        return
+
+    if not conflicts:
+        # Merge failed for some non-conflict reason (e.g. unrelated histories
+        # if unshallow didn't reach the base merge-base). Abort so we don't
+        # leave a half-merged state, and bail.
+        logger.warning(
+            "merge-followup: merge failed without conflicts %s stderr=%s",
+            log_kv, _redact_pat((merge.stderr or "").strip()),
+        )
+        subprocess.run(
+            ["git", "-C", str(repo_dir), "merge", "--abort"],
+            capture_output=True, text=True,
+        )
+        return
+
+    logger.info(
+        "merge-followup: %d conflicted file(s) %s",
+        len(conflicts), log_kv,
+    )
+    snapshots = _read_conflicted_snapshots(repo_dir, conflicts, settings)
+    if not snapshots:
+        logger.warning(
+            "merge-followup: no readable conflicted files %s",
+            log_kv,
+        )
+        _abort_merge(repo_dir)
+        return
+
+    ctx = MergeConflictContext(
+        repository=base_repo.full_name,
+        pr_number=pr_number,
+        base_branch=base_branch,
+        head_branch=head_branch,
+        conflicted_files=snapshots,
+    )
+    try:
+        resolution = provider.resolve_merge(ctx)
+    except LLMError as exc:
+        logger.warning("merge-followup: LLM error %s err=%s", log_kv, exc)
+        _abort_merge(repo_dir)
+        _notify("abort", conflicted_paths=conflicts, reason=f"LLM error: {exc}")
+        return
+
+    if resolution.decision == "abort":
+        logger.info(
+            "merge-followup: LLM aborted reason=%r %s",
+            resolution.reason, log_kv,
+        )
+        _abort_merge(repo_dir)
+        _notify(
+            "abort",
+            conflicted_paths=conflicts,
+            reason=resolution.reason or "LLM declined to resolve",
+        )
+        return
+
+    expected = set(conflicts)
+    returned = {f.path for f in resolution.files}
+    missing = expected - returned
+    if missing:
+        logger.warning(
+            "merge-followup: LLM resolution missed paths=%s %s",
+            sorted(missing), log_kv,
+        )
+        _abort_merge(repo_dir)
+        _notify(
+            "abort",
+            conflicted_paths=conflicts,
+            reason=f"LLM did not return content for: {sorted(missing)}",
+        )
+        return
+
+    to_apply = [f for f in resolution.files if f.path in expected]
+    # Reject any "resolved" file that still carries conflict markers — the
+    # model can echo the markered input back when it gets confused, and we
+    # must never push that to a real branch.
+    marker_offenders = [f.path for f in to_apply if _contains_conflict_markers(f.content)]
+    if marker_offenders:
+        logger.warning(
+            "merge-followup: LLM returned content with conflict markers paths=%s %s",
+            marker_offenders, log_kv,
+        )
+        _abort_merge(repo_dir)
+        _notify(
+            "abort",
+            conflicted_paths=conflicts,
+            reason=f"LLM resolution still contained conflict markers in: {marker_offenders}",
+        )
+        return
+
+    _write_merge_resolutions(repo_dir, to_apply)
+    subject = _normalise_commit_subject(
+        resolution.commit_message,
+        fallback=f"fix(merge): resolve conflicts with {base_branch}",
+    )
+    sha = _commit_with_subject(repo_dir, subject)
+    _push(repo_dir, head_branch)
+    logger.info(
+        "merge-followup: resolved sha=%s files=%d %s",
+        sha[:7], len(conflicts), log_kv,
+    )
+    _notify(
+        "resolve",
+        conflicted_paths=conflicts,
+        commit_sha=sha,
+        commit_subject=subject,
+        reason=resolution.reason or "resolved",
+    )
+
+
+def _list_conflicted_files(repo_dir: Path) -> list[str]:
+    res = subprocess.run(
+        ["git", "-C", str(repo_dir), "diff", "--name-only", "--diff-filter=U"],
+        capture_output=True, text=True,
+    )
+    if res.returncode != 0:
+        return []
+    return [line for line in (res.stdout or "").splitlines() if line]
+
+
+def _has_staged_changes(repo_dir: Path) -> bool:
+    res = subprocess.run(
+        ["git", "-C", str(repo_dir), "diff", "--cached", "--name-only"],
+        capture_output=True, text=True,
+    )
+    return bool((res.stdout or "").strip())
+
+
+def _read_conflicted_snapshots(
+    repo_dir: Path, paths: list[str], settings: Settings
+) -> list[FileSnapshot]:
+    """Read each conflicted file (with markers) for the LLM prompt.
+
+    Skips anything outside the repo, unreadable, or above the size cap so
+    the prompt stays bounded. Caller treats an empty list as "abort".
+    """
+    repo_root = repo_dir.resolve()
+    out: list[FileSnapshot] = []
+    for path in paths:
+        target = (repo_dir / path).resolve()
+        try:
+            target.relative_to(repo_root)
+        except ValueError:
+            continue
+        if not target.is_file():
+            continue
+        try:
+            if target.stat().st_size > settings.max_file_bytes:
+                continue
+            content = target.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        out.append(FileSnapshot(path=path, content=content))
+    return out
+
+
+_MARKER_RE = re.compile(r"^(?:<{7}|={7}|>{7})(?: |\t|$)", re.MULTILINE)
+
+
+def _contains_conflict_markers(content: str) -> bool:
+    """True if `content` has a line that begins with seven `<`, `=`, or `>`
+    followed by a space, tab, or end-of-line — the shape of git's standard
+    conflict markers. Not a substring scan, so legitimate prose like
+    `<<<<<<<some` (no space) won't false-positive."""
+    return bool(_MARKER_RE.search(content))
+
+
+def _write_merge_resolutions(repo_dir: Path, files: list[FileChange]) -> None:
+    """Write resolved file contents during a merge. Unlike `_apply_files`,
+    we do NOT skip when on-disk content matches: during a merge the on-disk
+    file holds conflict markers, so equality would mean the LLM echoed the
+    markers back — caller has already gate'd this by checking returned
+    paths cover every conflict."""
+    repo_root = repo_dir.resolve()
+    for change in files:
+        target = (repo_dir / change.path).resolve()
+        try:
+            target.relative_to(repo_root)
+        except ValueError:
+            logger.warning("merge-followup: rejected_path_outside_repo: %s", change.path)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(change.content, encoding="utf-8")
+
+
+def _abort_merge(repo_dir: Path) -> None:
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "merge", "--abort"],
+        capture_output=True, text=True,
+    )
 
 
 def _parse_repo(value: Any) -> RepositoryRef | None:

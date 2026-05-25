@@ -27,6 +27,13 @@ _DECISION_PREFIX = {
     "skip": ":warning: *Skipped — manual review needed*",
 }
 
+MergeOutcome = Literal["resolve", "abort"]
+
+_MERGE_PREFIX = {
+    "resolve": ":twisted_rightwards_arrows: *Merge conflict resolved*",
+    "abort": ":warning: *Merge conflict NOT auto-resolved — manual review needed*",
+}
+
 
 @dataclass
 class SlackNotifier:
@@ -73,6 +80,47 @@ class SlackNotifier:
             host=host,
         )
         return self._post(text)
+
+    def notify_merge_resolution(
+        self,
+        *,
+        outcome: MergeOutcome,
+        repo: str,
+        pr_number: int,
+        base_branch: str,
+        head_branch: str,
+        conflicted_paths: list[str],
+        commit_sha: str | None = None,
+        commit_subject: str | None = None,
+        reason: str = "",
+        host: str = "github.com",
+    ) -> dict[str, Any] | None:
+        """Post the merge-resolution outcome to Slack. Same fail-closed
+        semantics as notify_decision — never propagates failure."""
+        if not self.enabled:
+            return None
+        prefix = _MERGE_PREFIX.get(outcome, f"*{outcome}*")
+        pr_url = f"https://{host}/{repo}/pull/{pr_number}"
+        lines = [
+            f"{prefix} on <{pr_url}|{repo}#{pr_number}>",
+            f"• Branches: `{head_branch}` ← `{base_branch}`",
+        ]
+        if conflicted_paths:
+            preview = ", ".join(f"`{p}`" for p in conflicted_paths[:5])
+            if len(conflicted_paths) > 5:
+                preview += f" (+{len(conflicted_paths) - 5} more)"
+            lines.append(f"• Conflicts: {preview}")
+        if outcome == "resolve" and commit_sha:
+            short = commit_sha[:7]
+            commit_url = f"https://{host}/{repo}/commit/{commit_sha}"
+            subj = commit_subject or ""
+            lines.append(f"• Commit: <{commit_url}|`{short}`>  `{subj}`")
+        if reason:
+            snippet = reason.strip().replace("\n", " ")
+            if len(snippet) > 240:
+                snippet = snippet[:237].rstrip() + "…"
+            lines.append(f"> {snippet}")
+        return self._post("\n".join(lines))
 
     # --- internals -----------------------------------------------------------
 

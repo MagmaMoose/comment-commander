@@ -14,7 +14,13 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from config import Settings  # noqa: E402
 from dedupe import DeliveryStore  # noqa: E402
-from llm.base import CommentContext, Decision, FileChange  # noqa: E402
+from llm.base import (  # noqa: E402
+    CommentContext,
+    Decision,
+    FileChange,
+    MergeConflictContext,
+    MergeResolution,
+)
 
 
 @pytest.fixture
@@ -39,6 +45,10 @@ def settings(tmp_path: Path) -> Settings:
         max_file_bytes=180_000,
         max_comments_per_event=5,
         dry_run=False,
+        # Off by default in tests so the existing comment-fix tests don't
+        # try to run the post-push merge resolution flow. The merge tests
+        # override this with `replace(settings, merge_conflict_resolution=True)`.
+        merge_conflict_resolution=False,
         public_webhook_url="https://comment-commander.example.com/webhook",
         slack_bot_token=None,
         slack_channel_id=None,
@@ -52,17 +62,31 @@ def deliveries(settings: Settings) -> DeliveryStore:
 
 
 class StubProvider:
-    """Returns a pre-configured decision regardless of input."""
+    """Returns a pre-configured decision (and optional merge resolution)
+    regardless of input."""
 
-    def __init__(self, decision: Decision):
+    def __init__(
+        self,
+        decision: Decision,
+        merge_resolution: MergeResolution | None = None,
+    ):
         self.name = "stub"
         self.model = "stub"
         self.decision = decision
+        self.merge_resolution = merge_resolution or MergeResolution(
+            decision="abort",
+            reason="stub default",
+        )
         self.calls: list[CommentContext] = []
+        self.merge_calls: list[MergeConflictContext] = []
 
     def decide(self, context: CommentContext) -> Decision:
         self.calls.append(context)
         return self.decision
+
+    def resolve_merge(self, context: MergeConflictContext) -> MergeResolution:
+        self.merge_calls.append(context)
+        return self.merge_resolution
 
 
 @pytest.fixture
@@ -92,6 +116,16 @@ def comment_payload(**overrides: Any) -> dict[str, Any]:
             "head": {
                 "ref": "feature/copilot-fix",
                 "sha": "head-sha",
+                "repo": {
+                    "full_name": "octo-org/octo-repo",
+                    "name": "octo-repo",
+                    "owner": {"login": "octo-org"},
+                    "html_url": "https://github.com/octo-org/octo-repo",
+                },
+            },
+            "base": {
+                "ref": "main",
+                "sha": "base-sha",
                 "repo": {
                     "full_name": "octo-org/octo-repo",
                     "name": "octo-repo",

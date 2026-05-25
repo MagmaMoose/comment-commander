@@ -65,8 +65,12 @@ spec:
               value: "https://comment-commander.magmamoose.com/webhook"
             - name: LLM_PROVIDER
               value: "deepseek"
+            # `deepseek-reasoner` (DeepSeek-R1 series) thinks before answering
+            # and skips trivially-fixable comments far less often than
+            # `deepseek-chat`. Slower per call, but webhooks are async so
+            # request latency doesn't gate the 202.
             - name: LLM_MODEL
-              value: "deepseek-chat"
+              value: "deepseek-reasoner"
             # Copilot's review-author login varies. The legacy bot uses
             # `copilot[bot]` / `github-copilot[bot]`; the newer Copilot
             # Code Review surface posts as plain `Copilot`. Matching in

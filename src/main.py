@@ -23,7 +23,13 @@ from github_client import (
     verify_signature,
 )
 from llm import build_provider
-from processor import extract_jobs, parse_pr_url, process_jobs, process_pr_manual
+from processor import (
+    extract_jobs,
+    parse_pr_url,
+    process_jobs,
+    process_pr_manual,
+    summarize_exception,
+)
 from signing import install_ssh_signing_key
 from slack import SlackNotifier
 from triggers import TriggerResult, TriggerStore
@@ -218,7 +224,7 @@ def create_app(
             result.finish("ok")
             logger.info("delivery processed delivery=%s", delivery)
         except Exception as exc:  # noqa: BLE001 - background task must not crash the server
-            result.finish("error", error=type(exc).__name__)
+            result.finish("error", error=summarize_exception(exc))
             logger.exception("background_task_failed delivery=%s", delivery)
 
     @app.post("/process")
@@ -313,7 +319,7 @@ def create_app(
             result.finish("ok")
             logger.info("manual trigger processed trigger=%s", trigger_id)
         except Exception as exc:  # noqa: BLE001
-            result.finish("error", error=type(exc).__name__)
+            result.finish("error", error=summarize_exception(exc))
             logger.exception("manual_trigger_failed trigger=%s", trigger_id)
 
     @app.get("/process/{trigger_id}")
