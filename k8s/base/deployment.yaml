@@ -71,13 +71,16 @@ spec:
             # request latency doesn't gate the 202.
             - name: LLM_MODEL
               value: "deepseek-reasoner"
-            # Copilot's review-author login varies. The legacy bot uses
-            # `copilot[bot]` / `github-copilot[bot]`; the newer Copilot
-            # Code Review surface posts as plain `Copilot`. Matching in
+            # Review-bot logins to triage. Copilot has three identities:
+            # the legacy `copilot[bot]` / `github-copilot[bot]` and the
+            # newer Copilot Code Review surface that posts as plain
+            # `Copilot`. `github-code-quality[bot]` is the GitHub Code
+            # Quality reviewer (separate product, posts inline review
+            # comments the same shape as Copilot). Matching in
             # src/processor.py is case-insensitive, so casing here just
             # documents what's expected.
             - name: BOT_LOGINS
-              value: "Copilot,copilot[bot],github-copilot[bot]"
+              value: "Copilot,copilot[bot],github-copilot[bot],github-code-quality[bot]"
             # ALLOWED_REPOSITORIES: comma-separated allow-list ("" = all).
             - name: ALLOWED_REPOSITORIES
               value: ""
