@@ -2,6 +2,27 @@
 
 <!-- version list -->
 
+## v1.10.0 (2026-05-26)
+
+### Bug Fixes
+
+- **processor**: Map needs_review to skip in TriggerResult record_decision
+  ([`905a73d`](https://github.com/MagmaMoose/comment-commander/commit/905a73d5b4fcbd01f9e344020808360b05290fb9))
+
+- **tests**: Patch httpx.get in needs_review test to avoid real Slack call
+  ([`ef65142`](https://github.com/MagmaMoose/comment-commander/commit/ef6514272b076e92f22a5c454b7736eeff0905f9))
+
+### Chores
+
+- Update comment-commander image
+  ([`7720ce8`](https://github.com/MagmaMoose/comment-commander/commit/7720ce800d1f27363d2a599da22d46d464aedaf5))
+
+### Features
+
+- **processor**: Suppress low-value PR replies
+  ([`3a93d6b`](https://github.com/MagmaMoose/comment-commander/commit/3a93d6b0bc42d5734962ba1732dce27864bbf5b1))
+
+
 ## v1.9.0 (2026-05-25)
 
 ### Bug Fixes
