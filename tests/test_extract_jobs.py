@@ -1,6 +1,9 @@
 """Webhook payload → ReviewJob mapping."""
 from __future__ import annotations
 
+from dataclasses import replace
+
+from config import DEFAULT_BOT_LOGINS, _parse_login_set
 from conftest import comment_payload
 from processor import extract_jobs
 
@@ -33,6 +36,25 @@ def test_extracts_copilot_code_review_identity(settings):
     jobs = extract_jobs(payload, "pull_request_review_comment", settings)
     assert len(jobs) == 1
     assert jobs[0].comment.user_login == "Copilot"
+
+
+def test_extracts_github_code_quality_comment(settings):
+    """github-code-quality[bot] posts inline review comments the same shape as
+    Copilot. It's in DEFAULT_BOT_LOGINS, so settings parsed from env should
+    route it through the same triage flow."""
+    s = replace(settings, bot_logins=_parse_login_set(DEFAULT_BOT_LOGINS))
+    payload = comment_payload(
+        comment={
+            "id": 202,
+            "node_id": "PRRC_202",
+            "user": {"login": "github-code-quality[bot]"},
+            "body": "## Unused global variable\n\nThe global variable 'revision' is not used.",
+            "path": "backend/alembic/versions/0013.py",
+        }
+    )
+    jobs = extract_jobs(payload, "pull_request_review_comment", s)
+    assert len(jobs) == 1
+    assert jobs[0].comment.user_login == "github-code-quality[bot]"
 
 
 def test_ignores_disallowed_repository(settings):

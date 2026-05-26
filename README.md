@@ -116,7 +116,7 @@ Non-sensitive runtime knobs (set on the deployment):
 | `LLM_PROVIDER`              | `deepseek`                                             |
 | `LLM_MODEL`                 | provider default                                       |
 | `LLM_BASE_URL`              | provider default                                       |
-| `BOT_LOGINS`                | `copilot[bot],github-copilot[bot]`                     |
+| `BOT_LOGINS`                | `Copilot,copilot[bot],github-copilot[bot],github-code-quality[bot]` |
 | `ALLOWED_REPOSITORIES`      | `""` (all)                                             |
 | `MAX_FILE_BYTES`            | `180000`                                               |
 | `MAX_COMMENTS_PER_EVENT`    | `10`                                                   |

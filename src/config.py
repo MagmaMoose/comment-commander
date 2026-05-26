@@ -18,7 +18,9 @@ from github_client import GitHubInstance
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_BOT_LOGINS = "Copilot,copilot[bot],github-copilot[bot]"
+DEFAULT_BOT_LOGINS = (
+    "Copilot,copilot[bot],github-copilot[bot],github-code-quality[bot]"
+)
 DEFAULT_MAX_FILE_BYTES = 180_000
 DEFAULT_MAX_COMMENTS_PER_EVENT = 5
 
