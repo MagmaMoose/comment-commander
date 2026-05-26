@@ -2,6 +2,24 @@
 
 <!-- version list -->
 
+## v1.11.0 (2026-05-26)
+
+### Bug Fixes
+
+- **tests**: Accept params kwarg in needs_review fake_get
+  ([`62c7be5`](https://github.com/MagmaMoose/comment-commander/commit/62c7be5a2582dd9dd5b2cb84c6baadfba9a84a0d))
+
+### Chores
+
+- Update comment-commander image
+  ([`6c4f202`](https://github.com/MagmaMoose/comment-commander/commit/6c4f20238addb5cbc7ad2166124aaa0a8bfe749c))
+
+### Features
+
+- **config**: Triage github-code-quality[bot] reviews too
+  ([`017cb74`](https://github.com/MagmaMoose/comment-commander/commit/017cb7474a1d84451abb255e961878ec61a606a5))
+
+
 ## v1.10.0 (2026-05-26)
 
 ### Bug Fixes
