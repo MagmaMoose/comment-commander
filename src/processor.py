@@ -715,7 +715,12 @@ def _process_pr_locked(
                 )
                 continue
             if result is not None:
-                result.record_decision(pending_reply.decision)
+                # Map "needs_review" to "skip" to avoid skewing /process counts.
+                decision_to_record = (
+                    "skip" if pending_reply.decision == "needs_review"
+                    else pending_reply.decision
+                )
+                result.record_decision(decision_to_record)
             logger.info(
                 "thread handled comment_id=%s decision=%s pr_visible=%s replied=%s resolved=%s",
                 pending_reply.comment.id, pending_reply.decision,
