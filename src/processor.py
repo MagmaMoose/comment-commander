@@ -106,18 +106,26 @@ class ReviewJob:
 class _PendingReply:
     """In-flight bot action queued until after the optional push.
 
-    `decision` carries the LLM verdict (fix/dismiss/skip) for downstream
-    notifications. `None` means we couldn't even reach a verdict (file
-    unreadable / LLM error) — no Slack ping in that case.
+    `decision` carries the LLM verdict (fix/dismiss/skip/needs_review) for
+    downstream notifications. `None` means we won't notify at all (legacy
+    pre-needs_review code path; kept so existing tests still pass).
+
+    `pr_visible=False` suppresses the PR reply for outcomes the user
+    doesn't want leaking into the public thread — LLM errors, unreadable
+    files, empty-reply skips. Those still notify Slack via
+    `decision="needs_review"`. `needs_review_reason` is the stable
+    snake_case tag (`llm_error`, `file_unreadable`, `skip_no_reply`).
     """
     comment: ReviewComment
     thread: ReviewThread | None
     body: str
     resolve: bool
-    decision: Any = None  # Literal["fix", "dismiss", "skip"] | None
+    decision: Any = None  # Literal["fix", "dismiss", "skip", "needs_review"] | None
     commit_sha: str | None = None
     commit_subject: str | None = None
     reply_text: str = ""
+    pr_visible: bool = True
+    needs_review_reason: str | None = None
 
 
 def extract_jobs(payload: dict[str, Any], event: str, settings: Settings) -> list[ReviewJob]:
@@ -550,8 +558,10 @@ def _process_pr_locked(
                 )
                 replies.append(_PendingReply(
                     comment=comment, thread=thread,
-                    body="I could not safely inspect the file referenced by this comment, so I am leaving this thread open for manual review.",
-                    resolve=False, decision=None,
+                    body="",  # not posted to PR — see pr_visible=False
+                    resolve=False, decision="needs_review",
+                    pr_visible=False,
+                    needs_review_reason="file_unreadable",
                 ))
                 continue
             try:
@@ -565,8 +575,10 @@ def _process_pr_locked(
                 logger.warning("LLM call failed comment_id=%s: %s", comment.id, exc)
                 replies.append(_PendingReply(
                     comment=comment, thread=thread,
-                    body="I could not produce a confident answer for this comment, so I am leaving this thread open for manual review.",
-                    resolve=False, decision=None,
+                    body="",  # not posted to PR — see pr_visible=False
+                    resolve=False, decision="needs_review",
+                    pr_visible=False,
+                    needs_review_reason="llm_error",
                 ))
                 continue
 
@@ -576,12 +588,25 @@ def _process_pr_locked(
             )
 
             if decision.decision == "skip":
-                replies.append(_PendingReply(
-                    comment=comment, thread=thread,
-                    body=decision.reply
-                    or "I could not determine a safe change here without more repository context.",
-                    resolve=False, decision="skip", reply_text=decision.reply,
-                ))
+                # When the LLM has substantive reasoning, post that on the PR
+                # (other reviewers benefit from knowing why the bot skipped).
+                # When it doesn't, suppress the PR reply and route to Slack
+                # only — same canned-fallback policy as the two error paths
+                # above.
+                if (decision.reply or "").strip():
+                    replies.append(_PendingReply(
+                        comment=comment, thread=thread,
+                        body=decision.reply,
+                        resolve=False, decision="skip", reply_text=decision.reply,
+                    ))
+                else:
+                    replies.append(_PendingReply(
+                        comment=comment, thread=thread,
+                        body="",
+                        resolve=False, decision="needs_review",
+                        pr_visible=False,
+                        needs_review_reason="skip_no_reply",
+                    ))
                 continue
 
             if decision.decision == "dismiss":
@@ -672,13 +697,14 @@ def _process_pr_locked(
             replied = False
             resolved = False
             try:
-                marked = _format_reply_body(pending_reply.body)
-                if marked.strip():
-                    gh.reply_to_comment(
-                        base_repo, pr_number, pending_reply.comment.id,
-                        marked[:2000],
-                    )
-                    replied = True
+                if pending_reply.pr_visible:
+                    marked = _format_reply_body(pending_reply.body)
+                    if marked.strip():
+                        gh.reply_to_comment(
+                            base_repo, pr_number, pending_reply.comment.id,
+                            marked[:2000],
+                        )
+                        replied = True
                 if pending_reply.resolve and pending_reply.thread and not pending_reply.thread.is_resolved:
                     gh.resolve_thread(pending_reply.thread.id)
                     resolved = True
@@ -691,8 +717,9 @@ def _process_pr_locked(
             if result is not None:
                 result.record_decision(pending_reply.decision)
             logger.info(
-                "thread handled comment_id=%s replied=%s resolved=%s",
-                pending_reply.comment.id, replied, resolved,
+                "thread handled comment_id=%s decision=%s pr_visible=%s replied=%s resolved=%s",
+                pending_reply.comment.id, pending_reply.decision,
+                pending_reply.pr_visible, replied, resolved,
             )
             if pending_reply.decision is not None:
                 slack_ref = slack.notify_decision(
@@ -704,7 +731,8 @@ def _process_pr_locked(
                     comment_line=pending_reply.comment.line,
                     commit_sha=pending_reply.commit_sha,
                     commit_subject=pending_reply.commit_subject,
-                    reply=pending_reply.reply_text or "",
+                    reply=pending_reply.reply_text
+                    or (pending_reply.needs_review_reason or ""),
                     host=instance.host,
                 )
                 if result is not None:
