@@ -35,7 +35,7 @@ def test_slack_formats_needs_review_message(monkeypatch):
         captured.append(json)
         return httpx.Response(200, json={"ok": True, "ts": "1.0", "channel": "C1"})
 
-    def fake_get(url, *, headers, timeout):
+    def fake_get(url, *, params, headers, timeout):
         return httpx.Response(200, json={"ok": True, "permalink": "https://github.com/MagmaMoose/comment-commander/pull/42#issuecomment-12345"})
 
     monkeypatch.setattr(httpx, "post", fake_post)
