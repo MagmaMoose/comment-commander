@@ -19,12 +19,18 @@ logger = logging.getLogger(__name__)
 SLACK_API = "https://slack.com/api/chat.postMessage"
 SLACK_PERMALINK_API = "https://slack.com/api/chat.getPermalink"
 
-Decision = Literal["fix", "dismiss", "skip"]
+Decision = Literal["fix", "dismiss", "skip", "needs_review"]
 
+# `needs_review` is the bucket for outcomes we used to post to the PR as
+# canned "I could not..." replies — LLM errors, unreadable files, and skips
+# the LLM had no substantive reasoning for. We now suppress the PR reply
+# entirely and surface them here, so the public PR thread only carries
+# outcomes useful to other reviewers.
 _DECISION_PREFIX = {
     "fix": ":white_check_mark: *Fixed*",
     "dismiss": ":no_entry_sign: *Dismissed*",
     "skip": ":warning: *Skipped — manual review needed*",
+    "needs_review": ":eyes: *Needs review — bot couldn't act*",
 }
 
 MergeOutcome = Literal["resolve", "abort"]
