@@ -815,7 +815,9 @@ class TruncatedReplacementError(ProcessorError):
 
 
 def _line_count(text: str) -> int:
-    return text.count("\n") + 1 if text else 0
+    if not text:
+        return 0
+    return len(text.splitlines())
 
 
 def _looks_truncated(existing: str, new: str) -> bool:
