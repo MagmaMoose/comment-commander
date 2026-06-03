@@ -2,6 +2,22 @@
 
 <!-- version list -->
 
+## v1.11.1 (2026-06-03)
+
+### Bug Fixes
+
+- **processor**: Fix line counting to not count trailing newline as an extra line
+  ([`de5305c`](https://github.com/MagmaMoose/comment-commander/commit/de5305c253d7e6780f7aa7a5932f3800d8670fc0))
+
+- **processor**: Refuse truncated LLM file replacements
+  ([`561626a`](https://github.com/MagmaMoose/comment-commander/commit/561626aa7dbb3657ae46ff9ea05a0e3ab9129329))
+
+### Chores
+
+- Update comment-commander image
+  ([`2aa777f`](https://github.com/MagmaMoose/comment-commander/commit/2aa777f2b4c1d5dbad7708f25cae2b4139c80ee0))
+
+
 ## v1.11.0 (2026-05-26)
 
 ### Bug Fixes
