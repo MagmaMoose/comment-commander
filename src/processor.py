@@ -617,7 +617,22 @@ def _process_pr_locked(
                 ))
                 continue
 
-            applied = _apply_files(repo_dir, decision.files)
+            try:
+                applied = _apply_files(repo_dir, decision.files)
+            except TruncatedReplacementError as exc:
+                # The model returned a truncated "full file" — writing it would
+                # destroy the file. Abort this fix, discard any state, and route
+                # to a human rather than committing the damage.
+                logger.warning("refused truncated fix comment_id=%s: %s", comment.id, exc)
+                _reset_repo(repo_dir)
+                replies.append(_PendingReply(
+                    comment=comment, thread=thread,
+                    body="",  # not posted to PR — see pr_visible=False
+                    resolve=False, decision="needs_review",
+                    pr_visible=False,
+                    needs_review_reason="truncated_replacement",
+                ))
+                continue
             logger.info(
                 "applied file changes comment_id=%s changed=%d paths=%s",
                 comment.id, len(applied), [c.path for c in applied],
@@ -786,9 +801,41 @@ def _gather_files_for_comment(
     return [FileSnapshot(path=comment.path, content=content)]
 
 
+# The LLM is asked to return a file's "full contents after the change". A model
+# asked to regurgitate a large file routinely truncates it (output token limits),
+# and writing that verbatim deletes most of the file. Refuse a replacement that
+# collapses an existing, non-trivial file to a fraction of its size.
+_TRUNCATION_MIN_LINES = 20   # only guard files at least this large
+_TRUNCATION_MIN_RATIO = 0.5  # ...refuse if the replacement keeps < 50% of them
+
+
+class TruncatedReplacementError(ProcessorError):
+    """An LLM 'full file' replacement lost most of an existing file. Refusing it
+    (and aborting the whole fix) beats committing a truncated/destroyed file."""
+
+
+def _line_count(text: str) -> int:
+    return text.count("\n") + 1 if text else 0
+
+
+def _looks_truncated(existing: str, new: str) -> bool:
+    """True when `new` looks like a truncated render of `existing` rather than a
+    real edit: an existing non-trivial file collapsing to empty or to under half
+    its lines is almost always model truncation, not a legitimate change."""
+    existing_lines = _line_count(existing)
+    if existing_lines < _TRUNCATION_MIN_LINES:
+        return False  # small files can legitimately shrink a lot
+    if not new.strip():
+        return True  # blanked an existing file
+    return _line_count(new) < existing_lines * _TRUNCATION_MIN_RATIO
+
+
 def _apply_files(repo_dir: Path, files: list[FileChange]) -> list[FileChange]:
-    applied: list[FileChange] = []
     repo_root = repo_dir.resolve()
+    # Validate the whole change set BEFORE writing anything, so a truncated file
+    # aborts the fix cleanly instead of leaving a half-applied (partly destroyed)
+    # working tree.
+    pending: list[tuple[Path, FileChange]] = []
     for change in files:
         target = (repo_dir / change.path).resolve()
         try:
@@ -800,8 +847,17 @@ def _apply_files(repo_dir: Path, files: list[FileChange]) -> list[FileChange]:
             existing = target.read_text(encoding="utf-8") if target.exists() else None
         except (OSError, UnicodeDecodeError):
             existing = None
+        if existing is not None and _looks_truncated(existing, change.content):
+            raise TruncatedReplacementError(
+                f"refused truncated replacement for {change.path}: "
+                f"{_line_count(existing)} -> {_line_count(change.content)} lines"
+            )
         if existing == change.content:
             continue
+        pending.append((target, change))
+
+    applied: list[FileChange] = []
+    for target, change in pending:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(change.content, encoding="utf-8")
         applied.append(change)
